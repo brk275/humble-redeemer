@@ -40,7 +40,17 @@ def main():
             return json.loads(result)
         mcp = None
         try:
-            state = cli("status")
+            print('Checking auto-start CLI with redirected stdout', flush=True)
+            first = subprocess.Popen([str(executable), '--demo', '--json', 'status'], env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            first_output = queue.Queue()
+            threading.Thread(target=lambda: first_output.put(first.stdout.read()), daemon=True).start()
+            try:
+                first.wait(timeout=30)
+                state = json.loads(first_output.get(timeout=5))
+                assert first.returncode == 0
+            except (subprocess.TimeoutExpired, queue.Empty):
+                if first.poll() is None: first.kill(); first.wait(timeout=10)
+                raise RuntimeError('CLI auto-start retained a host pipe or failed to exit')
             assert state["demo"] and state["humble"]["connected"]
             plan = cli("plan", "--games", "demo-0")
             denied, _, _ = run_cli(['batch', 'start', plan['id']], timeout=30)

@@ -19,7 +19,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
-    process::Stdio,
     sync::Arc,
     time::Duration,
 };
@@ -138,28 +137,28 @@ pub async fn ensure_worker(demo: bool) -> Result<()> {
             .ok_or_else(|| anyhow!("Application location unavailable"))?
             .join(format!("hrctl{}", std::env::consts::EXE_SUFFIX))
     };
-    let mut command = std::process::Command::new(binary);
-    if demo {
-        command.arg("--demo");
-    }
-    command
-        .arg("worker")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
+        use std::process::Stdio;
+        let mut command = std::process::Command::new(&binary);
+        if demo {
+            command.arg("--demo");
+        }
+        command
+            .arg("worker")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
         command.process_group(0);
+        command.spawn().map_err(|_| {
+            anyhow!(
+                "Could not launch the bundled worker. Ensure hrctl is installed beside the GUI."
+            )
+        })?;
     }
     #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000);
-    }
-    command.spawn().map_err(|_| {
-        anyhow!("Could not launch the bundled worker. Ensure hrctl is installed beside the GUI.")
-    })?;
+    windows_peer::spawn_worker(&binary, demo)?;
     trace("worker spawned");
     for _ in 0..100 {
         tokio::time::sleep(Duration::from_millis(150)).await;
@@ -310,6 +309,50 @@ mod windows_peer {
             GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
         },
     };
+    pub(super) fn spawn_worker(binary: &std::path::Path, demo: bool) -> Result<()> {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::System::Threading::{
+            CREATE_NEW_PROCESS_GROUP, CreateProcessW, DETACHED_PROCESS, PROCESS_INFORMATION,
+            STARTUPINFOW,
+        };
+        let executable: Vec<u16> = binary.as_os_str().encode_wide().chain(Some(0)).collect();
+        let mut arguments: Vec<u16> = format!(
+            "\"{}\" {}worker",
+            binary.display(),
+            if demo { "--demo " } else { "" }
+        )
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+        // SAFETY: terminated buffers live through the call. No handles are
+        // inherited, including a host's redirected CLI/MCP pipes. Windows
+        // inherits this process' environment and working directory.
+        unsafe {
+            let mut startup: STARTUPINFOW = std::mem::zeroed();
+            startup.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+            let mut process: PROCESS_INFORMATION = std::mem::zeroed();
+            if CreateProcessW(
+                executable.as_ptr(),
+                arguments.as_mut_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+                std::ptr::null(),
+                std::ptr::null(),
+                &startup,
+                &mut process,
+            ) == 0
+            {
+                bail!(
+                    "Could not launch the bundled worker. Ensure hrctl is installed beside the GUI."
+                );
+            }
+            drop(OwnedHandle::from_raw_handle(process.hThread));
+            drop(OwnedHandle::from_raw_handle(process.hProcess));
+        }
+        Ok(())
+    }
     fn token_user(process: HANDLE) -> Result<Vec<usize>> {
         // SAFETY: token handles are owned until the API calls finish; the token
         // buffer uses pointer alignment and the size supplied by Windows.

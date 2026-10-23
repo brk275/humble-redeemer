@@ -1098,6 +1098,10 @@ fn main() -> eframe::Result {
             "Humble Redeemer"
         },
         eframe::NativeOptions {
+            // Direct3D also supports the software adapter on remote desktops
+            // whose system OpenGL implementation is limited to version 1.1.
+            #[cfg(windows)]
+            renderer: eframe::Renderer::Wgpu,
             viewport: egui::ViewportBuilder::default()
                 .with_inner_size([1200., 820.])
                 .with_min_inner_size([900., 650.]),
