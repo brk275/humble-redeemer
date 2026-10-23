@@ -99,6 +99,7 @@ pub async fn request_at(root: &Path, command: Command) -> Result<Value> {
         .await
         .map_err(|_| anyhow!("Worker unavailable. Start Humble Redeemer or run hrctl worker."))?;
     trace("connected");
+    verify_peer(&conn)?;
     let mut sender = &conn;
     let mut bytes = serde_json::to_vec(&Envelope {
         token: token(root)?,
@@ -188,9 +189,15 @@ pub async fn serve(demo: bool) -> Result<()> {
             std::fs::remove_file(path)?;
         }
     }
-    let listener = ListenerOptions::new()
-        .name(socket_name(&root)?)
-        .create_tokio()?;
+    let options = ListenerOptions::new().name(socket_name(&root)?);
+    #[cfg(windows)]
+    let options = {
+        use interprocess::os::windows::security_descriptor::SecurityDescriptor;
+        // Protected owner-only DACL; capability authentication remains required.
+        let sddl = widestring::U16CString::from_str("D:P(A;;GA;;;OW)")?;
+        options.security_descriptor(SecurityDescriptor::deserialize(&sddl)?)
+    };
+    let listener = options.create_tokio()?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -235,6 +242,7 @@ async fn handle_connection(
     engine: Arc<Mutex<Engine>>,
     expected: String,
 ) -> Result<()> {
+    verify_peer(&conn)?;
     let mut receiver = BufReader::new(&conn).take(65536);
     trace("worker accepted connection");
     let mut bytes = Vec::new();
@@ -267,6 +275,89 @@ async fn handle_connection(
     sender.write_all(&bytes).await?;
     sender.flush().await?;
     Ok(())
+}
+fn verify_peer(conn: &Stream) -> Result<()> {
+    use interprocess::local_socket::traits::StreamCommon;
+    let peer = conn.peer_creds()?;
+    #[cfg(unix)]
+    {
+        // SAFETY: geteuid has no preconditions and does not change process state.
+        if peer.euid() != Some(unsafe { libc::geteuid() }) {
+            bail!("Local worker belongs to a different user");
+        }
+    }
+    #[cfg(windows)]
+    {
+        let pid = peer
+            .pid()
+            .ok_or_else(|| anyhow!("Local worker identity unavailable"))?;
+        if !windows_peer::same_user(pid)? {
+            bail!("Local worker belongs to a different user");
+        }
+    }
+    Ok(())
+}
+#[cfg(windows)]
+mod windows_peer {
+    use anyhow::{Result, bail};
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::{
+        Foundation::HANDLE,
+        Security::{EqualSid, GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser},
+        System::Threading::{
+            GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+        },
+    };
+    fn token_user(process: HANDLE) -> Result<Vec<usize>> {
+        // SAFETY: token handles are owned until the API calls finish; the token
+        // buffer uses pointer alignment and the size supplied by Windows.
+        unsafe {
+            let mut raw = std::ptr::null_mut();
+            if OpenProcessToken(process, TOKEN_QUERY, &mut raw) == 0 {
+                bail!("Local process identity could not be checked");
+            }
+            let token = OwnedHandle::from_raw_handle(raw);
+            let mut length = 0;
+            GetTokenInformation(
+                token.as_raw_handle(),
+                TokenUser,
+                std::ptr::null_mut(),
+                0,
+                &mut length,
+            );
+            if length == 0 || length > 65536 {
+                bail!("Local process identity unavailable");
+            }
+            let mut buffer = vec![0usize; (length as usize).div_ceil(std::mem::size_of::<usize>())];
+            if GetTokenInformation(
+                token.as_raw_handle(),
+                TokenUser,
+                buffer.as_mut_ptr().cast(),
+                length,
+                &mut length,
+            ) == 0
+            {
+                bail!("Local process identity could not be read");
+            }
+            Ok(buffer)
+        }
+    }
+    pub(super) fn same_user(pid: u32) -> Result<bool> {
+        // SAFETY: the peer process handle and both token buffers remain live
+        // while EqualSid reads the SIDs returned by GetTokenInformation.
+        unsafe {
+            let raw = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if raw.is_null() {
+                bail!("Local worker identity could not be opened");
+            }
+            let process = OwnedHandle::from_raw_handle(raw);
+            let peer = token_user(process.as_raw_handle())?;
+            let current = token_user(GetCurrentProcess())?;
+            let peer = &*peer.as_ptr().cast::<TOKEN_USER>();
+            let current = &*current.as_ptr().cast::<TOKEN_USER>();
+            Ok(EqualSid(peer.User.Sid, current.User.Sid) != 0)
+        }
+    }
 }
 fn constant_time_equal(a: &[u8], b: &[u8]) -> bool {
     let mut diff = a.len() ^ b.len();
