@@ -1105,7 +1105,9 @@ impl Engine {
                             | Outcome::LoginRequired
                     )
                 })
-                .unwrap_or(if key.is_some() {
+                .unwrap_or(if value["is_expired"] == true {
+                    Outcome::Expired
+                } else if key.is_some() {
                     Outcome::Ready
                 } else {
                     Outcome::Unrevealed
@@ -1119,7 +1121,13 @@ impl Engine {
                 reason: previous
                     .as_ref()
                     .map(|g| g.reason.clone())
-                    .unwrap_or_default(),
+                    .unwrap_or_else(|| {
+                        if outcome == Outcome::Expired {
+                            outcome_reason(outcome).into()
+                        } else {
+                            String::new()
+                        }
+                    }),
                 service_code: previous.and_then(|g| g.service_code),
                 has_key: key.is_some(),
                 updated_at: now(),

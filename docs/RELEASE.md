@@ -8,4 +8,4 @@ Initial installers are **unsigned by a publisher**. macOS bundles are ad-hoc sig
 
 Review the batch before activation. Keys reported as expired, previously activated elsewhere or exhausted cannot be made valid by this app. Ambiguous network outcomes pause for reconciliation.
 
-**Live-service status:** This initial Rust prerelease has automated fixture coverage and native build/launch checks. Fresh real-account sign-in and a real approved activation batch are still awaiting local user verification. Preserve the legacy tool until that staged cutover passes.
+**Live-service status:** Real Humble sign-in inside the native app, windowless Humble/Steam session restoration, live library/Choice synchronization, exact ownership and private CSV migration have been verified locally. The Python worker is preserved and deliberately paused, with its Steam cooldown carried forward. A real approved activation batch is still pending; fixture success is not a live activation result. See the verification report for platform checks and remaining limits.
