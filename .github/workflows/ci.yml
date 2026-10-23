@@ -58,7 +58,13 @@ jobs:
       - name: Build release
         shell: bash
         run: |
-          export RUSTFLAGS="--remap-path-prefix=$PWD=workspace --remap-path-prefix=$HOME=build-home"
+          build_workspace_prefix="$PWD"
+          build_home_prefix="$HOME"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            build_workspace_prefix="$(cygpath -m "$PWD")"
+            build_home_prefix="$(cygpath -m "$HOME")"
+          fi
+          export RUSTFLAGS="--remap-path-prefix=$build_workspace_prefix=workspace --remap-path-prefix=$build_home_prefix=build-home"
           cargo build --workspace --release --locked
       - name: Worker, CLI and MCP smoke
         timeout-minutes: 4
