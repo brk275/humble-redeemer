@@ -65,6 +65,9 @@ def main():
                 if first.poll() is None: first.kill(); first.wait(timeout=10)
                 raise RuntimeError('CLI auto-start retained a host pipe or failed to exit')
             assert state["demo"] and state["humble"]["connected"]
+            claimed = cli('library', '--choice-only', '--eligible-only')
+            assert {g['id'] for g in claimed['games']} == {'demo-0','demo-1'}
+            assert {g['outcome'] for g in claimed['games']} == {'ready','unrevealed'}
             plan = cli("plan", "--games", "demo-0")
             denied, _, _ = run_cli(['batch', 'start', plan['id']], timeout=30)
             assert denied != 0
@@ -107,6 +110,11 @@ def main():
             status = rpc({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "status", "arguments": {}}})
             payload = json.loads(status["result"]["content"][0]["text"])
             assert payload["demo"] and len(payload["games"]) == len(state["games"])
+            claimed_rpc = rpc({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"library","arguments":{"choice_only":True,"eligible_only":True}}})
+            claimed_mcp = json.loads(claimed_rpc['result']['content'][0]['text'])
+            claimed_cli = cli('library', '--choice-only', '--eligible-only')
+            assert claimed_mcp == claimed_cli
+            assert {g['id'] for g in claimed_mcp['games']} == {'demo-1'}
             mcp.stdin.close()
             mcp.wait(timeout=10)
             print("PASS: native IPC, approval gate, queue completion, redacted export, official SDK MCP handshake/tools/status")

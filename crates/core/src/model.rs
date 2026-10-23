@@ -105,11 +105,32 @@ pub struct Game {
     pub title: String,
     pub app_id: Option<u32>,
     pub source: String,
+    #[serde(default)]
+    pub choice_month: Option<String>,
     pub outcome: Outcome,
     pub reason: String,
     pub service_code: Option<i64>,
     pub has_key: bool,
     pub updated_at: i64,
+}
+impl Game {
+    pub fn is_claimed_choice(&self) -> bool {
+        // Older local records lack provenance. Their official source label is
+        // a display/filter fallback only; it never establishes Steam ownership.
+        self.choice_month.is_some() || self.source.ends_with(" Humble Choice")
+    }
+    pub fn matches_library_query(
+        &self,
+        search: &str,
+        eligible_only: bool,
+        choice_only: bool,
+    ) -> bool {
+        let query = search.to_lowercase();
+        (!eligible_only || self.outcome.eligible())
+            && (!choice_only || self.is_claimed_choice())
+            && (self.title.to_lowercase().contains(&query)
+                || self.source.to_lowercase().contains(&query))
+    }
 }
 
 // Internal data is never included in snapshots, logs, CLI output, or MCP schemas.
@@ -296,5 +317,22 @@ mod tests {
         assert!(!Outcome::Expired.eligible());
         assert!(!Outcome::UnknownOutcome.eligible());
         assert!(Outcome::Exhausted.eligible());
+    }
+    #[test]
+    fn older_choice_records_are_queryable_without_changing_their_status() {
+        let game: Game = serde_json::from_value(serde_json::json!({
+            "id":"fixture","title":"Example game","app_id":null,
+            "source":"Example month Humble Choice","outcome":"unrevealed",
+            "reason":"","service_code":null,"has_key":false,"updated_at":0
+        }))
+        .unwrap();
+        assert!(game.choice_month.is_none());
+        assert!(game.matches_library_query("EXAMPLE MONTH", true, true));
+        assert_eq!(game.outcome, Outcome::Unrevealed);
+        let mut legacy = game.clone();
+        legacy.source = "Legacy import: already_owned.csv".into();
+        legacy.outcome = Outcome::LegacyOwnedOrUsed;
+        assert!(!legacy.is_claimed_choice());
+        assert!(!legacy.matches_library_query("", true, false));
     }
 }

@@ -56,8 +56,12 @@ impl Engine {
                             .flatten()
                             .map(|cookies| SavedSession {
                                 cookies,
-                                user_agent: "HumbleRedeemer/0.1.0 (unofficial desktop utility)"
-                                    .into(),
+                                user_agent: concat!(
+                                    "HumbleRedeemer/",
+                                    env!("CARGO_PKG_VERSION"),
+                                    " (unofficial desktop utility)"
+                                )
+                                .into(),
                             })
                     });
                 if let Some(saved) = saved {
@@ -100,6 +104,7 @@ impl Engine {
                     title: format!("Example adventure {}", index + 1),
                     app_id: Some(100 + index as u32),
                     source: "Synthetic fixtures".into(),
+                    choice_month: (index < 2).then(|| "example-month".into()),
                     outcome,
                     reason: if outcome.eligible() {
                         "Demo item; no service requests will be made.".into()
@@ -1126,6 +1131,7 @@ impl Engine {
                 title,
                 app_id: value.get("steam_app_id").and_then(app_id),
                 source: safe_text(source),
+                choice_month: order["product"]["choice_url"].as_str().map(safe_text),
                 outcome,
                 reason: previous
                     .as_ref()
@@ -1455,6 +1461,7 @@ impl Engine {
                 title,
                 app_id: None,
                 source: format!("Legacy import: {file_name}"),
+                choice_month: None,
                 outcome,
                 reason: "Original history did not preserve the exact service reason.".into(),
                 service_code: None,
@@ -1601,6 +1608,43 @@ mod tests {
         let (_dir, e) = engine();
         assert!(e.plan(vec!["demo-1".into()], vec![], false).is_err());
         assert!(e.plan(vec!["demo-1".into()], vec![], true).is_ok());
+    }
+    #[test]
+    fn claimed_choice_keys_still_require_steam_activation_and_reveal_permission() {
+        let (_dir, mut e) = engine();
+        e.ingest_order(&json!({
+            "gamekey":"synthetic-choice-order",
+            "choices_remaining":0,
+            "product":{"human_name":"Example Humble Choice","choice_url":"example-month"},
+            "tpkd_dict":{"all":[
+                {"machine_name":"claimed_fixture_steam","human_name":"Claimed fixture","key_type":"steam","steam_app_id":200,"redeemed":true,"redeemed_key_val":"AAAAA-BBBBB-CCCCC"},
+                {"machine_name":"unrevealed_fixture_steam","human_name":"Unrevealed fixture","key_type":"steam","steam_app_id":201,"claimed":true}
+            ]}
+        })).unwrap();
+        let games = e.store.games().unwrap();
+        let ready = games.iter().find(|g| g.title == "Claimed fixture").unwrap();
+        let unrevealed = games
+            .iter()
+            .find(|g| g.title == "Unrevealed fixture")
+            .unwrap();
+        assert_eq!(ready.outcome, Outcome::Ready);
+        assert_eq!(unrevealed.outcome, Outcome::Unrevealed);
+        assert_eq!(ready.choice_month.as_deref(), Some("example-month"));
+        assert!(ready.is_claimed_choice() && unrevealed.is_claimed_choice());
+        assert!(
+            e.plan(vec![ready.id.clone(), unrevealed.id.clone()], vec![], false)
+                .is_err()
+        );
+        let batch = e
+            .plan(vec![ready.id.clone(), unrevealed.id.clone()], vec![], true)
+            .unwrap();
+        assert!(!batch.approved);
+        assert_eq!(batch.state, "review");
+        assert!(
+            !serde_json::to_string(&e.snapshot().unwrap())
+                .unwrap()
+                .contains("AAAAA-BBBBB-CCCCC")
+        );
     }
     #[tokio::test]
     async fn stale_approval_cannot_start() {

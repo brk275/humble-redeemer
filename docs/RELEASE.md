@@ -1,11 +1,11 @@
-# Humble Redeemer 0.1.0 — prerelease
+# Humble Redeemer 0.1.1 — prerelease
 
-Independent native Rust app for macOS, Windows and Linux, with private local storage, human browser sign-in, reviewed redemption batches and CLI/MCP controls.
+Already claimed Humble Choice games now have a clear route to Steam activation: **Humble Choice → View claimed Choice keys awaiting Steam** opens the filtered library for review. Unclaimed monthly selections remain separate. Humble claims and revealed keys do not count as Steam activation results.
 
-Native CI runs unit/state-machine tests, a synthetic worker/CLI/MCP integration test, GUI launch checks and packaging. These tests contain no real account data. See the workflow results and verification document for current evidence and live-test limits.
+Synchronization records Choice-month provenance from paid order metadata. Earlier local records remain queryable without changing their outcomes. GUI, CLI (`library --choice-only --eligible-only`) and MCP (`library` with `choice_only` and `eligible_only`) use the same filters. New batches still require review and explicit permission for unrevealed keys.
 
-Initial installers are **unsigned by a publisher**. macOS bundles are ad-hoc signed and are not notarized. Browser drivers are provisioned separately from official sources. No telemetry or embedded account data.
+Native CI runs unit/state-machine tests, a synthetic worker/CLI/MCP integration test, GUI launch checks and installed/extracted package checks for macOS Apple Silicon/Intel, Windows x64 and Linux x64. No real account data enters CI. See the workflow and verification report for evidence.
 
-Review the batch before activation. Keys reported as expired, previously activated elsewhere or exhausted cannot be made valid by this app. Ambiguous network outcomes pause for reconciliation.
+Installers remain **unsigned by a publisher**. macOS bundles are ad-hoc signed and are not notarized. Third-party licenses accompany each installer. No telemetry or embedded account data.
 
-**Live-service status:** Real Humble sign-in inside the native app, windowless Humble/Steam session restoration, live library/Choice synchronization, exact ownership and private CSV migration have been verified locally. The Python worker is preserved and deliberately paused, with its Steam cooldown carried forward. A real approved one-game activation batch is paused while the updated macOS binary awaits local vault authorization; fixture success is not a live activation result. See the verification report for platform checks and remaining limits.
+**Live-service limit:** Earlier real sign-in, windowless session restoration, library/Choice synchronization and private CSV migration were verified locally. This update's live synchronization and the approved one-game activation check are pending local macOS vault authorization. Fixture success does not prove a real activation. Original history is preserved; no new claims, reveals or activations are performed merely by opening the new view.

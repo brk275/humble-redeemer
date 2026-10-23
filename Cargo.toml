@@ -8,7 +8,7 @@ exclude = ["vendor/glib-0.18.5"]
 glib = { path = "vendor/glib-0.18.5" }
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license = "MIT"
 rust-version = "1.88"

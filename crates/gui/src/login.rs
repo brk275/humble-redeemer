@@ -174,7 +174,7 @@ impl Login {
                     cookies,
                     user_agent: event["user_agent"]
                         .as_str()
-                        .unwrap_or("HumbleRedeemer/0.1.0")
+                        .unwrap_or(concat!("HumbleRedeemer/", env!("CARGO_PKG_VERSION")))
                         .into(),
                 });
             }

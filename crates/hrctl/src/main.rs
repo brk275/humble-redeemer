@@ -1,7 +1,7 @@
 mod mcp;
 use clap::{Parser, Subcommand};
 use humble_redeemer_core::{ipc, model::*, privacy::safe_text};
-use serde_json::{Value, json};
+use serde_json::json;
 
 #[derive(Parser)]
 #[command(version, about = "Private local controls for Humble Redeemer")]
@@ -32,6 +32,10 @@ enum Action {
     Library {
         #[arg(long, default_value = "")]
         search: String,
+        #[arg(long)]
+        choice_only: bool,
+        #[arg(long)]
+        eligible_only: bool,
     },
     Choices,
     Plan {
@@ -179,21 +183,17 @@ async fn run(args: Args) -> anyhow::Result<()> {
     };
     let mut value = ipc::request(args.demo, command).await?;
     match args.command {
-        Action::Library { search } => {
-            let query = search.to_lowercase();
-            let games = value["games"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default()
+        Action::Library {
+            search,
+            choice_only,
+            eligible_only,
+        } => {
+            let snapshot: Snapshot = serde_json::from_value(value)?;
+            let games = snapshot
+                .games
                 .into_iter()
-                .filter(|g| {
-                    g["title"]
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_lowercase()
-                        .contains(&query)
-                })
-                .collect::<Vec<Value>>();
+                .filter(|g| g.matches_library_query(&search, eligible_only, choice_only))
+                .collect::<Vec<_>>();
             value = json!({"games":games});
         }
         Action::Choices => value = json!({"choices":value["choices"]}),

@@ -43,6 +43,7 @@ struct App {
     choice_selected: HashSet<String>,
     search: String,
     only_eligible: bool,
+    only_claimed_choice: bool,
     allow_reveal: bool,
     review: Option<Batch>,
     rx: Option<mpsc::Receiver<Result<Value, String>>>,
@@ -74,6 +75,7 @@ impl App {
             choice_selected: HashSet::new(),
             search: String::new(),
             only_eligible: false,
+            only_claimed_choice: false,
             allow_reveal: false,
             review: None,
             rx: None,
@@ -508,8 +510,14 @@ impl App {
                 self.export_dialog(false);
             }
         });
+        ui.checkbox(
+            &mut self.only_claimed_choice,
+            "Claimed Humble Choice keys only",
+        );
+        if !results {
+            ui.label(RichText::new("Claimed on Humble means a key is in your Humble library. Ready and Unrevealed still need a reviewed Steam activation batch.").small().color(MUTED));
+        }
         ui.add_space(12.);
-        let query = self.search.to_lowercase();
         let games = self
             .snapshot
             .as_ref()
@@ -517,11 +525,12 @@ impl App {
                 s.games
                     .iter()
                     .filter(|g| {
-                        (!self.only_eligible || g.outcome.eligible())
-                            && (g.title.to_lowercase().contains(&query)
-                                || g.source.to_lowercase().contains(&query))
-                            && (!results
-                                || !matches!(g.outcome, Outcome::Ready | Outcome::Unrevealed))
+                        g.matches_library_query(
+                            &self.search,
+                            self.only_eligible,
+                            self.only_claimed_choice,
+                        ) && (!results
+                            || !matches!(g.outcome, Outcome::Ready | Outcome::Unrevealed))
                     })
                     .cloned()
                     .collect::<Vec<_>>()
@@ -646,7 +655,31 @@ impl App {
         }
     }
     fn choices(&mut self, ui: &mut egui::Ui) {
-        ui.label(RichText::new("Select eligible Steam games from your existing Choice entitlements. Monthly limits apply; purchases and promotional memberships are excluded.").color(MUTED));
+        ui.label(
+            RichText::new(
+                "Claiming a game on Humble and activating its key on Steam are separate steps.",
+            )
+            .color(MUTED),
+        );
+        let pending = self.snapshot.as_ref().map_or(0, |s| {
+            s.games
+                .iter()
+                .filter(|g| g.is_claimed_choice() && g.outcome.eligible())
+                .count()
+        });
+        card(ui, |ui| {
+            ui.strong("Already claimed on Humble");
+            ui.label(format!("{pending} claimed Choice keys still need review or Steam activation. Unrevealed keys require reveal permission in the batch review."));
+            if ui
+                .button("View claimed Choice keys awaiting Steam")
+                .clicked()
+            {
+                self.show_claimed_choice_keys();
+            }
+        });
+        ui.add_space(14.);
+        ui.heading("Unclaimed Choice selections");
+        ui.label(RichText::new("Select Steam games from existing paid entitlements. Monthly limits apply; purchases and promotional memberships are excluded.").color(MUTED));
         ui.add_space(14.);
         let choices = self
             .snapshot
@@ -704,6 +737,14 @@ impl App {
                 ui.add_space(8.);
             }
         });
+    }
+    fn show_claimed_choice_keys(&mut self) {
+        self.page = Page::Library;
+        self.only_claimed_choice = true;
+        self.only_eligible = true;
+        self.search.clear();
+        self.selected.clear();
+        self.choice_selected.clear();
     }
     fn review(&mut self, ui: &mut egui::Ui) {
         let Some(batch) = self.review.clone() else {
@@ -1175,6 +1216,19 @@ fn main() -> eframe::Result {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn claimed_choice_navigation_does_not_select_or_approve_any_games() {
+        let mut app = App::new(true, false);
+        app.search = "previous search".into();
+        app.selected.insert("previous-library-selection".into());
+        app.choice_selected
+            .insert("previous-choice-selection".into());
+        app.show_claimed_choice_keys();
+        assert!(matches!(app.page, Page::Library));
+        assert!(app.only_claimed_choice && app.only_eligible);
+        assert!(app.search.is_empty() && app.selected.is_empty() && app.choice_selected.is_empty());
+        assert!(app.rx.is_none() && app.review.is_none());
+    }
     #[cfg(target_os = "linux")]
     #[test]
     fn glib_string_iterator_backport() {
@@ -1189,6 +1243,13 @@ mod tests {
     fn every_screen_renders_without_network_or_credentials() {
         let ctx = egui::Context::default();
         let mut app = App::new(true, false);
+        let directory = tempfile::tempdir().unwrap();
+        let engine = humble_redeemer_core::engine::Engine::new(
+            humble_redeemer_core::store::Store::open(directory.path().into(), true).unwrap(),
+            true,
+        )
+        .unwrap();
+        app.snapshot = Some(engine.snapshot().unwrap());
         for page in [
             Page::Overview,
             Page::Library,

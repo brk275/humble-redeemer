@@ -82,7 +82,11 @@ fn platform(kind: BrowserKind) -> Result<&'static str> {
 }
 fn http_client() -> Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
-        .user_agent("HumbleRedeemer/0.1.0 (unofficial desktop utility)")
+        .user_agent(concat!(
+            "HumbleRedeemer/",
+            env!("CARGO_PKG_VERSION"),
+            " (unofficial desktop utility)"
+        ))
         .timeout(Duration::from_secs(40))
         .build()?)
 }

@@ -232,6 +232,7 @@ mod tests {
             title: "Fixture".into(),
             app_id: Some(1),
             source: "Fixture".into(),
+            choice_month: None,
             outcome: Outcome::InFlight,
             reason: String::new(),
             service_code: None,

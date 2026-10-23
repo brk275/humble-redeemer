@@ -33,6 +33,8 @@ The default embedded sign-in needs no separate Chrome/Firefox window or browser 
 4. Approve the batch once. The worker keeps processing that scope when the window closes.
 5. Review distinct outcomes in Results. Use Settings for local history imports and exports.
 
+Claiming a Choice game on Humble does not activate it on Steam. **Humble Choice → View claimed Choice keys awaiting Steam** opens the filtered library for those existing keys. Ready keys can be reviewed for activation; Unrevealed keys also need explicit reveal permission in the batch review. Unclaimed monthly selections remain in a separate section on the Choice screen.
+
 Steam activation limits persist across cancellation, new batches and restarts. The worker honors `Retry-After`, including HTTP dates; absent guidance, it waits one hour after an activation-limit response. It never rotates accounts, bypasses the limit or blindly replays an uncertain activation. Expired sessions require manual sign-in again.
 
 The legacy Python tool must finish or be paused before starting a Rust redemption worker. The app detects a running legacy script and refuses concurrent activation.
@@ -45,6 +47,7 @@ hrctl connect humble
 hrctl connect steam
 hrctl sync
 hrctl library --search "Example"
+hrctl library --choice-only --eligible-only --json
 hrctl plan --games <game-id> --allow-reveal
 hrctl batch approve <batch-id> --digest <reviewed-digest>
 hrctl batch start <batch-id>
@@ -59,7 +62,7 @@ hrctl quit --pause
 
 ## Build and test
 
-Use current stable Rust with a native compiler toolchain. On Linux install the development packages listed in the workflow. Python 3 is used only by build/test scripts.
+Use current stable Rust with a native compiler toolchain. On Linux install the development packages listed in the workflow. Python 3.11+ is used only by build/test scripts.
 
 ```sh
 cargo build --workspace --locked

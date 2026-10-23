@@ -10,6 +10,7 @@ import plistlib
 import shutil
 import subprocess
 import time
+import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -37,7 +38,7 @@ def main():
     binary_dir = ROOT / "target" / args.profile
     output = ROOT / "dist"
     output.mkdir(exist_ok=True)
-    version = "0.1.0"
+    version = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["package"]["version"]
     arch = "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "x64"
     system = platform.system()
     if system == "Darwin":
