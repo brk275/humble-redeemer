@@ -192,7 +192,9 @@ pub async fn serve(demo: bool) -> Result<()> {
     let options = ListenerOptions::new().name(socket_name(&root)?);
     #[cfg(windows)]
     let options = {
-        use interprocess::os::windows::security_descriptor::SecurityDescriptor;
+        use interprocess::os::windows::{
+            local_socket::ListenerOptionsExt, security_descriptor::SecurityDescriptor,
+        };
         // Protected owner-only DACL; capability authentication remains required.
         let sddl = widestring::U16CString::from_str("D:P(A;;GA;;;OW)")?;
         options.security_descriptor(SecurityDescriptor::deserialize(&sddl)?)
