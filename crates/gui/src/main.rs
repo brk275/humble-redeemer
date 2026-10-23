@@ -1027,6 +1027,17 @@ impl eframe::App for App {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             } else if self.smoke_started.elapsed() > Duration::from_secs(30) {
                 eprintln!("Synthetic native sign-in view did not become ready");
+                if let Ok(root) = humble_redeemer_core::store::data_root(true) {
+                    let diagnostics = serde_json::json!({
+                        "error":safe_text(&self.error),
+                        "login_message":self.login.as_ref().map(|login|safe_text(&login.message)),
+                        "has_view":self.login.is_some(),
+                    });
+                    let _ = std::fs::write(
+                        root.join("smoke-diagnostics.json"),
+                        diagnostics.to_string(),
+                    );
+                }
                 std::process::exit(2);
             }
         }

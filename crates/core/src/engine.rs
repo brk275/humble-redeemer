@@ -647,6 +647,15 @@ impl Engine {
             self.store.put_batch(&batch)?;
             return Ok(());
         }
+        if self.validate_review(&batch).is_err() {
+            batch.state = "paused".into();
+            batch.approved = false;
+            batch.message =
+                "Reviewed items changed during synchronization. Plan and review a new batch."
+                    .into();
+            self.store.put_batch(&batch)?;
+            return Ok(());
+        }
         if let Some(deadline) = self.pending_cooldown()? {
             batch.next_retry_at = Some(batch.next_retry_at.unwrap_or(deadline).max(deadline));
             batch.state = "cooldown".into();
@@ -1192,6 +1201,9 @@ impl Engine {
                 parsed.push(((*order).clone(), data));
             }
         }
+        // Keep disabled review records for claims already consumed by an
+        // approved batch, so synchronization cannot erase its approval scope.
+        let preserved = self.consumed_choice_reviews()?;
         self.store.clear_choices()?;
         for (order, data) in parsed {
             let options = &data["contentChoiceOptions"];
@@ -1272,7 +1284,32 @@ impl Engine {
                 )?;
             }
         }
+        for choice in preserved {
+            self.store.put_choice(&choice)?;
+        }
         Ok(())
+    }
+    fn consumed_choice_reviews(&self) -> Result<Vec<Choice>> {
+        let ids: HashSet<String> = self
+            .store
+            .batches()?
+            .into_iter()
+            .filter(|b| {
+                b.approved
+                    && ["approved", "running", "cooldown", "paused"].contains(&b.state.as_str())
+            })
+            .flat_map(|b| b.choice_ids.into_iter().take(b.choice_cursor))
+            .collect();
+        Ok(self
+            .store
+            .choices()?
+            .into_iter()
+            .filter(|c| ids.contains(&c.id))
+            .map(|mut c| {
+                c.available = false;
+                c
+            })
+            .collect())
     }
     async fn claim_choice(&mut self, batch: &mut Batch) -> Result<()> {
         let id = &batch.choice_ids[batch.choice_cursor];
@@ -2006,6 +2043,51 @@ mod scope_tests {
             .await
             .is_err()
         );
+    }
+    #[tokio::test]
+    async fn running_batch_cannot_activate_changed_review_scope() {
+        let d = tempfile::tempdir().unwrap();
+        let mut e = Engine::new(Store::open(d.path().into(), true).unwrap(), true).unwrap();
+        let b = e.plan(vec!["demo-0".into()], vec![], false).unwrap();
+        e.handle(Command::Approve {
+            batch_id: b.id.clone(),
+            digest: b.digest.clone(),
+        })
+        .await
+        .unwrap();
+        e.handle(Command::Start {
+            batch_id: b.id.clone(),
+        })
+        .await
+        .unwrap();
+        let mut game = e.store.game("demo-0").unwrap();
+        game.title = "Different fixture after synchronization".into();
+        e.store.put_game(&game).unwrap();
+        e.tick().await.unwrap();
+        let current = e.store.batch(&b.id).unwrap();
+        assert_eq!(current.state, "paused");
+        assert!(!current.approved);
+        assert_eq!(current.cursor, 0);
+        assert_eq!(e.store.game("demo-0").unwrap().outcome, Outcome::Ready);
+    }
+    #[tokio::test]
+    async fn consumed_choice_scope_survives_sync_without_becoming_available() {
+        let d = tempfile::tempdir().unwrap();
+        let mut e = Engine::new(Store::open(d.path().into(), true).unwrap(), true).unwrap();
+        let mut b = e.plan(vec![], vec!["demo-choice".into()], true).unwrap();
+        b.approved = true;
+        b.state = "running".into();
+        b.choice_cursor = 1;
+        e.store.put_batch(&b).unwrap();
+        let preserved = e.consumed_choice_reviews().unwrap();
+        e.store.clear_choices().unwrap();
+        for choice in preserved {
+            e.store.put_choice(&choice).unwrap();
+        }
+        assert!(!e.store.choices().unwrap()[0].available);
+        e.validate_review(&b).unwrap();
+        e.tick().await.unwrap();
+        assert_eq!(e.store.batch(&b.id).unwrap().state, "complete");
     }
 }
 

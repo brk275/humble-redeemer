@@ -21,7 +21,12 @@ def exercise(binary_dir):
             command = [str(binary_dir / ('humble-redeemer' + suffix)), '--smoke-test']
             if platform.system() == 'Linux': command = ['xvfb-run', '-a', *command]
             subprocess.run(command, env=env, check=True, timeout=60)
-            subprocess.run([*command, '--login-demo'], env=env, check=True, timeout=60)
+            try:
+                subprocess.run([*command, '--login-demo'], env=env, check=True, timeout=60)
+            except subprocess.CalledProcessError:
+                diagnostics=Path(data)/'smoke-diagnostics.json'
+                if diagnostics.exists(): print(diagnostics.read_text(), flush=True)
+                raise
         finally:
             subprocess.run([str(binary_dir / ('hrctl' + suffix)), '--demo', 'quit', '--pause'], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
             time.sleep(1)

@@ -43,10 +43,23 @@ jobs:
           python-version: '3.12'
       - name: Linux native dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libwebkit2gtk-4.1-dev libgtk-3-dev libxkbcommon-dev libxkbcommon-x11-dev libgl1-mesa-dri libx11-dev libxrandr-dev libxi-dev libxcursor-dev libgl1-mesa-dev libfontconfig1-dev xvfb
+        run: |
+          sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y --no-install-recommends libdbus-1-dev libwebkit2gtk-4.1-dev libgtk-3-dev libxkbcommon-dev libxkbcommon-x11-dev libgl1-mesa-dri libx11-dev libxrandr-dev libxi-dev libxcursor-dev libgl1-mesa-dev libfontconfig1-dev xvfb xauth
       - name: Windows installer tools
         if: runner.os == 'Windows'
         run: choco install nsis -y --no-progress
+      - name: Windows official WebView2 Runtime
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $bootstrapper = Join-Path $env:RUNNER_TEMP 'MicrosoftEdgeWebview2Setup.exe'
+          Invoke-WebRequest 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile $bootstrapper
+          $signature = Get-AuthenticodeSignature $bootstrapper
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Microsoft Corporation') { throw 'WebView2 bootstrapper signature verification failed' }
+          Start-Process $bootstrapper -ArgumentList '/silent','/install' -Wait
+          $runtime = Get-ChildItem "${env:ProgramFiles(x86)}\Microsoft\EdgeWebView\Application\*\msedgewebview2.exe" -ErrorAction SilentlyContinue
+          if (-not $runtime) { throw 'Official WebView2 Runtime was not installed' }
       - name: Privacy audit
         run: python scripts/audit.py
       - name: Format
