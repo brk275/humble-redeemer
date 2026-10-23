@@ -661,7 +661,7 @@ impl App {
             )
             .color(MUTED),
         );
-        let pending = self.snapshot.as_ref().map_or(0, |s| {
+        let pending = self.snapshot.as_ref().map(|s| {
             s.games
                 .iter()
                 .filter(|g| g.is_claimed_choice() && g.outcome.eligible())
@@ -669,9 +669,16 @@ impl App {
         });
         card(ui, |ui| {
             ui.strong("Already claimed on Humble");
-            ui.label(format!("{pending} claimed Choice keys still need review or Steam activation. Unrevealed keys require reveal permission in the batch review."));
+            if let Some(pending) = pending {
+                ui.label(format!("{pending} eligible claimed Choice keys still need review or Steam activation. Unrevealed keys require reveal permission in the batch review."));
+            } else {
+                ui.label("Your library is still loading. Respond to any Keychain prompt before reviewing saved Choice keys.");
+            }
             if ui
-                .button("View claimed Choice keys awaiting Steam")
+                .add_enabled(
+                    pending.is_some(),
+                    egui::Button::new("View claimed Choice keys awaiting Steam"),
+                )
                 .clicked()
             {
                 self.show_claimed_choice_keys();
