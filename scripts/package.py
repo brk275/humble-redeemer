@@ -13,16 +13,18 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def copy_common(destination, binary_dir, extension=""):
+def copy_common(destination, binary_dir, extension="", support=None):
     destination.mkdir(parents=True, exist_ok=True)
     for name in ("humble-redeemer", "hrctl"):
         shutil.copy2(binary_dir / (name + extension), destination / (name + extension))
-    shutil.copy2(ROOT / "LICENSE", destination)
+    support = support or destination
+    support.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(ROOT / "LICENSE", support)
     for document in ("README.md", "SECURITY.md"):
-        shutil.copy2(ROOT / document, destination)
-    shutil.copytree(ROOT / "docs", destination / "docs", dirs_exist_ok=True)
+        shutil.copy2(ROOT / document, support)
+    shutil.copytree(ROOT / "docs", support / "docs", dirs_exist_ok=True)
     if (ROOT / "target/notices").exists():
-        shutil.copytree(ROOT / "target/notices", destination / "third-party-licenses", dirs_exist_ok=True)
+        shutil.copytree(ROOT / "target/notices", support / "third-party-licenses", dirs_exist_ok=True)
 
 
 def main():
@@ -38,13 +40,15 @@ def main():
     system = platform.system()
     if system == "Darwin":
         app = output / "Humble Redeemer.app"
-        copy_common(app / "Contents/MacOS", binary_dir)
+        if app.exists(): shutil.rmtree(app)
         resources = app / "Contents/Resources"
-        resources.mkdir(exist_ok=True)
+        copy_common(app / "Contents/MacOS", binary_dir, support=resources)
         shutil.copy2(ROOT / "assets/icon.svg", resources)
         with (app / "Contents/Info.plist").open("wb") as info:
             plistlib.dump({"CFBundleName": "Humble Redeemer", "CFBundleDisplayName": "Humble Redeemer", "CFBundleExecutable": "humble-redeemer", "CFBundleIdentifier": "io.github.brk275.humble-redeemer", "CFBundleVersion": version, "CFBundleShortVersionString": version, "CFBundlePackageType": "APPL", "NSHighResolutionCapable": True, "LSMinimumSystemVersion": "12.0", "NSHumanReadableCopyright": "Copyright 2026 brk275. Unofficial utility."}, info)
-        subprocess.run(["codesign", "--force", "--deep", "--sign", "-", str(app)], check=True)
+        subprocess.run(["codesign", "--force", "--sign", "-", str(app / "Contents/MacOS/hrctl")], check=True)
+        subprocess.run(["codesign", "--force", "--sign", "-", str(app)], check=True)
+        subprocess.run(["codesign", "--verify", "--deep", "--strict", str(app)], check=True)
         if not args.skip_installers:
             dmg = output / f"Humble-Redeemer-{version}-macOS-{arch}-unsigned.dmg"
             staging = output / "dmg-staging"

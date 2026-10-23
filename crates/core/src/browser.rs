@@ -263,10 +263,40 @@ pub async fn provision_driver(root: &Path, kind: BrowserKind) -> Result<PathBuf>
         }
     } else {
         use md5::Md5;
-        let expected = google_hash
+        let expected = if let Some(hash) = google_hash
             .as_deref()
             .and_then(|h| h.split(',').find_map(|p| p.trim().strip_prefix("md5=")))
-            .ok_or_else(|| anyhow!("Google storage did not supply its archive integrity hash"))?;
+        {
+            hash.to_owned()
+        } else {
+            // Some Google objects expose CRC32C only in headers. Ask the official
+            // object-metadata API for its MD5 rather than dropping verification.
+            let object = url
+                .strip_prefix("https://storage.googleapis.com/chrome-for-testing-public/")
+                .ok_or_else(|| anyhow!("Invalid Google driver object"))?;
+            let metadata: Value = client
+                .get(format!(
+                    "https://storage.googleapis.com/storage/v1/b/chrome-for-testing-public/o/{}",
+                    urlencoding::encode(object)
+                ))
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            if metadata["name"] != object
+                || metadata["size"]
+                    .as_str()
+                    .and_then(|s| s.parse::<usize>().ok())
+                    != Some(bytes.len())
+            {
+                bail!("Google driver object metadata did not match the download");
+            }
+            metadata["md5Hash"]
+                .as_str()
+                .ok_or_else(|| anyhow!("Google did not supply a verifiable archive digest"))?
+                .to_owned()
+        };
         let actual = base64::engine::general_purpose::STANDARD.encode(Md5::digest(&bytes));
         if expected != actual {
             bail!("Google driver archive integrity mismatch");
@@ -429,10 +459,10 @@ impl Browser {
         }
         let capabilities = match kind {
             BrowserKind::Chrome => {
-                json!({"browserName":"chrome", "goog:chromeOptions":{"binary":binary,"args":[format!("--user-data-dir={}",this.profile.display()),"--no-first-run"],"prefs":{"credentials_enable_service":false,"profile.password_manager_enabled":false}}})
+                json!({"browserName":"chrome", "goog:chromeOptions":{"binary":binary,"args":[format!("--user-data-dir={}",this.profile.display()),"--no-first-run","--incognito"],"prefs":{"credentials_enable_service":false,"profile.password_manager_enabled":false}}})
             }
             BrowserKind::Firefox => {
-                json!({"browserName":"firefox", "moz:firefoxOptions":{"binary":binary,"prefs":{"signon.rememberSignons":false}}})
+                json!({"browserName":"firefox", "moz:firefoxOptions":{"binary":binary,"prefs":{"signon.rememberSignons":false,"browser.privatebrowsing.autostart":true}}})
             }
         };
         let result: Value = this

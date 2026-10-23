@@ -458,6 +458,14 @@ impl Engine {
         else {
             return Ok(());
         };
+        if !self.demo && legacy_running() {
+            batch.state = "paused".into();
+            batch.message =
+                "The legacy redeemer is running. Finish or pause it before resuming this batch."
+                    .into();
+            self.store.put_batch(&batch)?;
+            return Ok(());
+        }
         if batch.binding != self.binding()? {
             batch.state = "paused".into();
             batch.approved = false;
@@ -1052,6 +1060,15 @@ impl Engine {
                 "Humble did not confirm this Choice claim. Synchronize before continuing.".into();
             return Ok(());
         }
+        for mut choice in self.store.choices()? {
+            if choice.id == selected.id {
+                choice.available = false;
+            }
+            if choice.month_id == selected.month_id {
+                choice.remaining = choice.remaining.saturating_sub(1);
+            }
+            self.store.put_choice(&choice)?;
+        }
         let order = self
             .connected(Provider::Humble)?
             .fetch(
@@ -1118,6 +1135,7 @@ impl Engine {
             .from_path(path)
             .map_err(|_| anyhow!("Could not open the selected local history file"))?;
         let mut count = 0;
+        let mut occurrences = HashMap::<String, usize>::new();
         for record in reader.records() {
             let record = record.map_err(|_| {
                 anyhow!("Legacy CSV format is invalid; original file was not changed")
@@ -1127,7 +1145,19 @@ impl Engine {
             }
             let title = safe_text(&record[1]);
             let key = record[2].trim();
-            let id = self.id("legacy", &format!("{file_name}|{title}|{key}"));
+            let identity = format!("{file_name}|{}|{title}|{key}", &record[0]);
+            let occurrence = occurrences.entry(identity.clone()).or_default();
+            *occurrence += 1;
+            let id = self.id("legacy-row-v2", &format!("{identity}|{occurrence}"));
+            // Replace the early prerelease's collapsed import records, while preserving
+            // every source occurrence in the new, idempotent migration format.
+            let old_id = self.id("legacy", &format!("{file_name}|{title}|{key}"));
+            if self.store.game(&old_id).is_ok() {
+                self.store
+                    .db
+                    .execute("DELETE FROM games WHERE id=?1", [&old_id])?;
+                self.store.forget(&format!("game:{old_id}"))?;
+            }
             if self.store.game(&id).is_ok() {
                 continue;
             }
@@ -1146,6 +1176,7 @@ impl Engine {
                 self.store.put_secret(
                     &format!("game:{id}"),
                     &PrivateGame {
+                        order: record[0].into(),
                         key: Some(key.into()),
                         ..Default::default()
                     },
@@ -1234,6 +1265,11 @@ fn objects(value: &Value) -> Vec<&Value> {
     }
     found
 }
+#[cfg(test)]
+pub fn legacy_running() -> bool {
+    false
+}
+#[cfg(not(test))]
 pub fn legacy_running() -> bool {
     let system = sysinfo::System::new_all();
     system.processes().values().any(|p| {
@@ -1628,5 +1664,30 @@ mod scope_tests {
             .await
             .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod migration_occurrence_tests {
+    use super::*;
+    #[test]
+    fn duplicate_history_rows_and_distinct_orders_are_preserved_idempotently() {
+        let d = tempfile::tempdir().unwrap();
+        let mut e = Engine::new(Store::open(d.path().into(), true).unwrap(), true).unwrap();
+        let p = d.path().join("errored.csv");
+        let original=b"fixture-order,Same fixture,False\nfixture-order,Same fixture,False\nother-order,Same fixture,False\n";
+        std::fs::write(&p, original).unwrap();
+        assert_eq!(e.import_csv(&p).unwrap(), 3);
+        assert_eq!(e.import_csv(&p).unwrap(), 0);
+        assert_eq!(
+            e.store
+                .games()
+                .unwrap()
+                .iter()
+                .filter(|g| g.outcome == Outcome::LegacyFailure)
+                .count(),
+            3
+        );
+        assert_eq!(std::fs::read(&p).unwrap(), original);
     }
 }

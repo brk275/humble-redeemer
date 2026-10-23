@@ -83,7 +83,9 @@ impl App {
         if self.rx.is_some() {
             return;
         }
-        self.error.clear();
+        if !matches!(command, Command::Snapshot) {
+            self.error.clear();
+        }
         self.busy = label.into();
         let (tx, rx) = mpsc::channel();
         let demo = self.demo;
@@ -159,7 +161,14 @@ impl App {
         }
     }
     fn refresh(&mut self) {
-        self.dispatch(Command::Snapshot, "Refreshing…")
+        self.dispatch(
+            Command::Snapshot,
+            if self.snapshot.is_none() {
+                "Starting worker… respond to any system keychain prompt"
+            } else {
+                "Refreshing…"
+            },
+        )
     }
     fn plan(&mut self) {
         self.dispatch(
