@@ -71,7 +71,7 @@ impl Login {
             builder.with_additional_browser_args("")
         };
         let builder = if fixture {
-            builder.with_html("<!doctype html><html><body style='font:20px system-ui;padding:30px'><h1>Synthetic sign-in view</h1><label>Fixture text input <input id='fixture-input' autofocus aria-label='Fixture text input'></label><p>No account or network request is made.</p><script>window.ipc.postMessage(JSON.stringify({fixture_ready:true}));</script></body></html>")
+            builder.with_html("<!doctype html><html><body style='font:20px system-ui;padding:30px'><h1>Synthetic sign-in view</h1><label>Fixture text input <input id='fixture-input' autofocus aria-label='Fixture text input'></label><p>No account or network request is made.</p><script>window.fetch=async()=>({status:200,redirected:false,json:async()=>[]});window.ipc.postMessage(JSON.stringify({fixture_loaded:true}));</script></body></html>")
         } else {
             builder.with_url(provider.login())
         };
@@ -91,29 +91,37 @@ impl Login {
     }
     pub fn poll(&mut self) -> Option<Command> {
         let view = self.view.as_ref()?;
-        if !self.fixture && !self.submitted && self.last_check.elapsed() > Duration::from_secs(4) {
+        if !self.submitted && self.last_check.elapsed() > Duration::from_secs(4) {
             self.last_check = Instant::now();
-            let path = if self.provider == Provider::Humble {
-                "/api/v1/user/order"
-            } else {
-                "/account/registerkey"
-            };
-            let script = format!(
-                r#"(()=>{{ if(location.origin!=={}) return; fetch({},{{credentials:'same-origin'}}).then(async r=>{{ const ok=r.status===200&&!r.redirected&&{}; window.ipc.postMessage(JSON.stringify({{authenticated:ok,status:r.status,user_agent:navigator.userAgent}})); }}).catch(()=>{{}}); }})();"#,
-                json!(self.provider.origin()),
-                json!(path),
-                if self.provider == Provider::Humble {
-                    "Array.isArray(await r.json().catch(()=>null))"
-                } else {
-                    "true"
-                }
-            );
-            let _ = view.evaluate_script(&script);
+            let script = authentication_script(self.provider, self.fixture);
+            if view.evaluate_script(&script).is_err() {
+                self.message="The sign-in view could not run its session check. Reload or reconnect this account.".into();
+            }
         }
         while let Ok(event) = self.events.try_recv() {
-            if event["fixture_ready"] == true {
+            if event["fixture_loaded"] == true {
+                self.message = "Synthetic form loaded; checking the authentication bridge…".into();
+            }
+            if self.fixture && event["authenticated"] == true {
                 self.fixture_ready = true;
-                self.message = "Synthetic native sign-in view is ready.".into();
+                self.message =
+                    "Synthetic authentication bridge, typing and paste are ready.".into();
+                continue;
+            }
+            if event["check_error"] == true {
+                self.message="The provider's session check failed. Finish any security step and verify again.".into();
+            }
+            if event["wrong_origin"] == true {
+                self.message =
+                    "Return to the official account page before verifying sign-in.".into();
+            }
+            if let Some(status) = event["status"].as_u64()
+                && status != 200
+                && status != 403
+            {
+                self.message = format!(
+                    "Sign-in is not verified yet (HTTP {status}). Finish signing in and verify again."
+                );
             }
             if event["status"] == 403 {
                 self.message="The provider is showing a security check. Complete it manually on this page; the app cannot bypass it.".into();
@@ -123,12 +131,12 @@ impl Login {
                 if !allowed_origin(self.provider, &url) {
                     continue;
                 }
-                let Ok(cookies) = view.cookies_for_url(self.provider.origin()) else {
+                let Ok(cookies) = view.cookies() else {
                     self.message =
                         "The native browser could not hand off its session. Try again.".into();
                     continue;
                 };
-                let cookies=cookies.into_iter().map(|c|json!({"name":c.name(),"value":c.value(),"domain":c.domain(),"path":c.path().unwrap_or("/"),"secure":c.secure().unwrap_or(true),"httpOnly":c.http_only().unwrap_or(false),"expiry":c.expires_datetime().map(|d|d.unix_timestamp())})).collect();
+                let cookies=cookies.into_iter().filter(|c|cookie_domain_matches(self.provider,c.domain())).map(|c|json!({"name":c.name(),"value":c.value(),"domain":c.domain(),"path":c.path().unwrap_or("/"),"secure":c.secure().unwrap_or(true),"httpOnly":c.http_only().unwrap_or(false),"expiry":c.expires_datetime().map(|d|d.unix_timestamp())})).collect();
                 self.submitted = true;
                 self.message = "Verifying the windowless session…".into();
                 return Some(Command::AttachNativeSession {
@@ -156,6 +164,37 @@ impl Drop for Login {
         self.view.take();
         let _ = std::fs::remove_dir_all(&self.directory);
     }
+}
+fn cookie_domain_matches(provider: Provider, domain: Option<&str>) -> bool {
+    let Ok(uri) = wry::http::Uri::try_from(provider.origin()) else {
+        return false;
+    };
+    let Some(host) = uri.host() else {
+        return false;
+    };
+    let domain = domain.unwrap_or(host).trim_start_matches('.');
+    host == domain || host.ends_with(&format!(".{domain}"))
+}
+fn authentication_script(provider: Provider, fixture: bool) -> String {
+    let path = if provider == Provider::Humble {
+        "/api/v1/user/order"
+    } else {
+        "/account/registerkey"
+    };
+    let guard = if fixture {
+        "false".into()
+    } else {
+        format!("location.origin!=={}", json!(provider.origin()))
+    };
+    let body_check = if provider == Provider::Humble {
+        "Array.isArray(await r.json().catch(()=>null))"
+    } else {
+        "true"
+    };
+    format!(
+        r#"(()=>{{if({guard}){{window.ipc.postMessage(JSON.stringify({{wrong_origin:true}}));return;}}fetch({path},{{credentials:'same-origin'}}).then(async r=>{{const ok=r.status===200&&!r.redirected&&{body_check};window.ipc.postMessage(JSON.stringify({{authenticated:ok,status:r.status,user_agent:navigator.userAgent}}));}}).catch(()=>window.ipc.postMessage(JSON.stringify({{check_error:true}})));}})();"#,
+        path = json!(path)
+    )
 }
 fn allowed_origin(provider: Provider, url: &str) -> bool {
     wry::http::Uri::try_from(url).ok().is_some_and(|uri| {
@@ -191,6 +230,29 @@ fn allowed_navigation(provider: Provider, url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn parent_domain_cookies_are_included_without_leaking_other_sites() {
+        assert!(cookie_domain_matches(
+            Provider::Humble,
+            Some(".humblebundle.com")
+        ));
+        assert!(cookie_domain_matches(
+            Provider::Humble,
+            Some("www.humblebundle.com")
+        ));
+        assert!(!cookie_domain_matches(
+            Provider::Humble,
+            Some("evilhumblebundle.com")
+        ));
+        assert!(!cookie_domain_matches(
+            Provider::Humble,
+            Some("example.invalid")
+        ));
+        assert!(cookie_domain_matches(
+            Provider::Steam,
+            Some(".steampowered.com")
+        ));
+    }
     #[test]
     fn login_navigation_is_service_scoped() {
         assert!(allowed_navigation(

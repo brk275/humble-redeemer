@@ -7,6 +7,7 @@ import platform
 import subprocess
 import sys
 import tempfile
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -23,6 +24,7 @@ def exercise(binary_dir):
             subprocess.run([*command, '--login-demo'], env=env, check=True, timeout=60)
         finally:
             subprocess.run([str(binary_dir / ('hrctl' + suffix)), '--demo', 'quit', '--pause'], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+            time.sleep(1)
 
 
 def main():
@@ -41,7 +43,14 @@ def main():
             try:
                 exercise(mount / 'Humble Redeemer.app/Contents/MacOS')
             finally:
-                subprocess.run(['hdiutil', 'detach', str(mount)], check=True)
+                for attempt in range(5):
+                    detached=subprocess.run(['hdiutil', 'detach', str(mount)], capture_output=True)
+                    if detached.returncode==0: break
+                    time.sleep(1)
+                else:
+                    # The test has explicitly quit its worker. WebKit auxiliary
+                    # processes can briefly retain the disposable mounted bundle.
+                    subprocess.run(['hdiutil', 'detach', '-force', str(mount)], check=True)
         elif system == 'Windows':
             installer = next(folder.glob('Humble-Redeemer-*-Windows-*.exe'))
             installed = temporary / 'installed'
