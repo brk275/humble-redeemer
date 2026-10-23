@@ -141,6 +141,28 @@ impl Engine {
         Ok(())
     }
     pub fn snapshot(&self) -> Result<Snapshot> {
+        let mut batches = self.store.batches()?;
+        for batch in &mut batches {
+            let ended = ["complete", "cancelled"].contains(&batch.state.as_str());
+            let changed = !ended && self.validate_review(batch).is_err();
+            batch.review_required = !ended
+                && (changed
+                    || batch.state == "needs_review"
+                    || (!batch.approved && batch.state == "paused"));
+            let cooldown_expired = batch.next_retry_at.is_some_and(|t| t <= now());
+            batch.next_retry_at = if ended {
+                None
+            } else {
+                batch.next_retry_at.filter(|t| *t > now())
+            };
+            if changed {
+                batch.message = "The saved approval no longer matches these items or account connections. Prepare a new review for the remaining items.".into();
+            } else if batch.review_required && batch.state == "paused" {
+                batch.message = "This batch needs a new review before it can run.".into();
+            } else if cooldown_expired && batch.state == "paused" {
+                batch.message = "Paused. The previous cooldown has ended.".into();
+            }
+        }
         let mut steam = self.connections[&Provider::Steam].clone();
         steam.session_renewal_available = self
             .browsers
@@ -162,7 +184,7 @@ impl Engine {
             steam,
             games: self.store.games()?,
             choices: self.store.choices()?,
-            batches: self.store.batches()?,
+            batches,
             message: safe_text(&self.message),
             browsers: available_browsers(),
         })
@@ -408,7 +430,19 @@ impl Engine {
             }
             Command::Start { batch_id } | Command::Resume { batch_id } => {
                 let mut batch = self.store.batch(&batch_id)?;
-                self.validate_review(&batch)?;
+                if ["complete", "cancelled", "needs_review", "claiming"]
+                    .contains(&batch.state.as_str())
+                {
+                    bail!("This batch has ended or needs a new review; create a new plan");
+                }
+                if let Err(error) = self.validate_review(&batch) {
+                    batch.state = "needs_review".into();
+                    batch.approved = false;
+                    batch.next_retry_at = batch.next_retry_at.filter(|t| *t > now());
+                    batch.message = safe_text(&error.to_string());
+                    self.store.put_batch(&batch)?;
+                    return Err(error);
+                }
                 if !batch.approved || batch.binding != self.binding()? {
                     bail!(
                         "Review and approve this batch for the current account connections first"
@@ -424,16 +458,12 @@ impl Engine {
                 }) {
                     bail!("Another batch is already active");
                 }
-                if ["complete", "cancelled", "needs_review", "claiming"]
-                    .contains(&batch.state.as_str())
-                {
-                    bail!("This batch has ended or needs a new review; create a new plan");
-                }
                 if !self.connections[&Provider::Humble].connected
                     || !self.connections[&Provider::Steam].connected
                 {
                     bail!("Connect both accounts before running this batch");
                 }
+                batch.next_retry_at = batch.next_retry_at.filter(|t| *t > now());
                 if let Some(deadline) = self.pending_cooldown()? {
                     batch.next_retry_at =
                         Some(batch.next_retry_at.unwrap_or(deadline).max(deadline));
@@ -444,6 +474,12 @@ impl Engine {
                     "running"
                 }
                 .into();
+                batch.message = if batch.state == "cooldown" {
+                    "Waiting for the service cooldown before continuing this approved batch."
+                } else {
+                    "Running this approved batch."
+                }
+                .into();
                 self.store.put_batch(&batch)?;
             }
             Command::Pause { batch_id } => {
@@ -452,6 +488,7 @@ impl Engine {
                     bail!("Only active or approved batches can be paused");
                 }
                 batch.state = "paused".into();
+                batch.message = "Paused. Resume this batch when you are ready.".into();
                 self.store.put_batch(&batch)?;
             }
             Command::Cancel { batch_id } => {
@@ -584,6 +621,7 @@ impl Engine {
             choice_ids,
             allow_reveal,
             approved: false,
+            review_required: false,
             state: "review".into(),
             cursor: 0,
             choice_cursor: 0,
@@ -2313,6 +2351,74 @@ mod reveal_recovery_tests {
 #[cfg(test)]
 mod scope_tests {
     use super::*;
+    #[tokio::test]
+    async fn stale_paused_approval_requires_a_new_review_and_expired_cooldowns_are_hidden() {
+        let d = tempfile::tempdir().unwrap();
+        let mut e = Engine::new(Store::open(d.path().into(), true).unwrap(), true).unwrap();
+        let plan = e.plan(vec!["demo-0".into()], vec![], false).unwrap();
+        e.handle(Command::Approve {
+            batch_id: plan.id.clone(),
+            digest: plan.digest.clone(),
+        })
+        .await
+        .unwrap();
+        e.handle(Command::Pause {
+            batch_id: plan.id.clone(),
+        })
+        .await
+        .unwrap();
+        let mut saved = e.store.batch(&plan.id).unwrap();
+        saved.next_retry_at = Some(now() - 60);
+        saved.message = "A service cooldown is active.".into();
+        e.store.put_batch(&saved).unwrap();
+        let snapshot = e.snapshot().unwrap();
+        let current = &snapshot.batches[0];
+        assert!(current.can_resume());
+        assert_eq!(current.next_retry_at, None);
+        assert_eq!(current.message, "Paused. The previous cooldown has ended.");
+        e.store
+            .setting("humble", "changed-fixture-account")
+            .unwrap();
+        let snapshot = e.snapshot().unwrap();
+        assert!(snapshot.batches[0].review_required);
+        assert!(!snapshot.batches[0].can_resume());
+        // A status query neither rewrites history nor starts any work.
+        assert_eq!(e.store.batch(&plan.id).unwrap().state, "paused");
+        assert!(e.store.batch(&plan.id).unwrap().approved);
+        assert!(
+            e.handle(Command::Resume {
+                batch_id: plan.id.clone()
+            })
+            .await
+            .is_err()
+        );
+        let saved = e.store.batch(&plan.id).unwrap();
+        assert_eq!(saved.state, "needs_review");
+        assert!(!saved.approved);
+        assert_eq!(e.store.game("demo-0").unwrap().outcome, Outcome::Ready);
+        let replacement = e.plan(vec!["demo-0".into()], vec![], false).unwrap();
+        assert_eq!(replacement.state, "review");
+        assert!(!replacement.approved);
+        assert_ne!(replacement.digest, plan.digest);
+    }
+    #[test]
+    fn completed_batch_stays_historical_when_connections_change() {
+        let d = tempfile::tempdir().unwrap();
+        let e = Engine::new(Store::open(d.path().into(), true).unwrap(), true).unwrap();
+        let mut batch = e.plan(vec!["demo-0".into()], vec![], false).unwrap();
+        batch.state = "complete".into();
+        batch.cursor = 1;
+        batch.next_retry_at = Some(now() + 60);
+        e.store.put_batch(&batch).unwrap();
+        e.store
+            .setting("humble", "changed-fixture-account")
+            .unwrap();
+        let current = &e.snapshot().unwrap().batches[0];
+        assert!(!current.review_required);
+        assert!(!current.can_resume());
+        assert_eq!(current.next_retry_at, None);
+        assert_eq!(current.state, "complete");
+    }
     #[tokio::test]
     async fn changed_reviewed_title_or_app_requires_new_approval() {
         let d = tempfile::tempdir().unwrap();

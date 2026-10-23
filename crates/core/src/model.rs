@@ -197,12 +197,22 @@ pub struct Batch {
     pub choice_ids: Vec<String>,
     pub allow_reveal: bool,
     pub approved: bool,
+    /// Computed by the worker for snapshots; never grants permission to run.
+    #[serde(default)]
+    pub review_required: bool,
     pub state: String,
     pub cursor: usize,
     pub choice_cursor: usize,
     pub next_retry_at: Option<i64>,
     pub binding: String,
     pub message: String,
+}
+impl Batch {
+    pub fn can_resume(&self) -> bool {
+        self.approved
+            && !self.review_required
+            && ["approved", "paused"].contains(&self.state.as_str())
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Snapshot {

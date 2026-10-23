@@ -760,6 +760,15 @@ impl App {
         self.selected.clear();
         self.choice_selected.clear();
     }
+    fn prepare_remaining_review(&mut self, batch: &Batch) {
+        let Some(snapshot) = &self.snapshot else {
+            return;
+        };
+        match remaining_review_command(batch, snapshot) {
+            Ok(command) => self.dispatch(command, "Preparing a fresh review…"),
+            Err(message) => self.error = message.into(),
+        }
+    }
     fn review(&mut self, ui: &mut egui::Ui) {
         let Some(batch) = self.review.clone() else {
             ui.label("Select games in Library or Humble Choice, then prepare a batch for review.");
@@ -806,8 +815,13 @@ impl App {
         ui.monospace(format!("Batch {}", batch.id));
         ui.label(RichText::new(format!("State: {}", batch.state)).color(MUTED));
         ui.add_space(12.);
-        let can_start = batch.state == "review"
-            || (batch.approved && ["approved", "paused"].contains(&batch.state.as_str()));
+        if batch.review_required {
+            ui.label(RichText::new(&batch.message).color(Color32::from_rgb(242, 193, 114)));
+            if primary(ui, "Prepare new review", self.rx.is_none()) {
+                self.prepare_remaining_review(&batch);
+            }
+        }
+        let can_start = !batch.review_required && (batch.state == "review" || batch.can_resume());
         let action = if batch.approved {
             "Start approved batch"
         } else {
@@ -838,7 +852,7 @@ impl App {
                                 .size(18.)
                                 .strong(),
                         );
-                        ui.label(RichText::new(&batch.state).color(ACCENT));
+                        ui.label(RichText::new(if batch.review_required {"Needs new review"} else {&batch.state}).color(ACCENT));
                     });
                     ui.add(
                         egui::ProgressBar::new(if batch.game_ids.is_empty() {
@@ -854,11 +868,18 @@ impl App {
                             batch.choice_ids.len()
                         )),
                     );
-                    if let Some(deadline) = batch.next_retry_at {
+                    if let Some(deadline) = batch.next_retry_at.filter(|t| *t > now()) {
                         ui.label(format!(
                             "Cooldown remaining: {} minutes",
                             ((deadline - now()).max(0) + 59) / 60
                         ));
+                    }
+                    if batch.state == "complete" && let Some(snapshot) = &self.snapshot {
+                        let games: Vec<_> = snapshot.games.iter().filter(|g| batch.game_ids.contains(&g.id)).collect();
+                        let redeemed = games.iter().filter(|g| g.outcome == Outcome::Redeemed).count();
+                        let exhausted = games.iter().filter(|g| g.outcome == Outcome::Exhausted).count();
+                        let owned = games.iter().filter(|g| g.outcome == Outcome::AlreadyOwned).count();
+                        ui.label(format!("{redeemed} redeemed · {owned} already owned · {exhausted} keys exhausted · {} other results", games.len().saturating_sub(redeemed+exhausted+owned)));
                     }
                     ui.label(RichText::new(&batch.message).small().color(MUTED));
                     ui.horizontal(|ui| {
@@ -876,7 +897,10 @@ impl App {
                                 "Pausing…",
                             );
                         }
-                        if batch.state == "paused" && ui.button("Resume approved batch").clicked() {
+                        if batch.review_required && ui.button("Prepare new review").clicked() {
+                            self.prepare_remaining_review(batch);
+                        }
+                        if batch.state == "paused" && batch.can_resume() && ui.button("Resume approved batch").clicked() {
                             self.dispatch(
                                 Command::Resume {
                                     batch_id: batch.id.clone(),
@@ -1107,6 +1131,37 @@ impl eframe::App for App {
         }
     }
 }
+fn remaining_review_command(batch: &Batch, snapshot: &Snapshot) -> Result<Command, &'static str> {
+    let game_ids: Vec<_> = batch
+        .game_ids
+        .iter()
+        .skip(batch.cursor)
+        .filter(|id| {
+            snapshot
+                .games
+                .iter()
+                .any(|g| &g.id == *id && g.outcome.eligible())
+        })
+        .cloned()
+        .collect();
+    let choice_ids: Vec<_> = batch
+        .choice_ids
+        .iter()
+        .skip(batch.choice_cursor)
+        .filter(|id| snapshot.choices.iter().any(|c| &c.id == *id && c.available))
+        .cloned()
+        .collect();
+    if game_ids.is_empty() && choice_ids.is_empty() {
+        return Err(
+            "No remaining items can be planned automatically. Review individual results in Library.",
+        );
+    }
+    Ok(Command::Plan {
+        game_ids,
+        choice_ids,
+        allow_reveal: batch.allow_reveal,
+    })
+}
 fn card<R>(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui) -> R) -> R {
     egui::Frame::new()
         .fill(Color32::from_rgb(25, 32, 43))
@@ -1230,6 +1285,85 @@ fn main() -> eframe::Result {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn stale_batch_screens_offer_review_instead_of_resume_or_expired_cooldown() {
+        let directory = tempfile::tempdir().unwrap();
+        let engine = humble_redeemer_core::engine::Engine::new(
+            humble_redeemer_core::store::Store::open(directory.path().into(), true).unwrap(),
+            true,
+        )
+        .unwrap();
+        let mut batch = engine.plan(vec!["demo-0".into()], vec![], false).unwrap();
+        batch.state = "paused".into();
+        batch.approved = true;
+        batch.review_required = true;
+        batch.next_retry_at = Some(now() - 60);
+        batch.message = "Prepare a new review for the remaining items.".into();
+        let mut snapshot = engine.snapshot().unwrap();
+        snapshot.batches = vec![batch.clone()];
+        let mut app = App::new(true, false);
+        app.snapshot = Some(snapshot);
+        app.review = Some(batch);
+        let ctx = egui::Context::default();
+        fn append_text(shape: &egui::epaint::Shape, text: &mut String) {
+            match shape {
+                egui::epaint::Shape::Text(t) => text.push_str(&t.galley.job.text),
+                egui::epaint::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        append_text(shape, text);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for page in [Page::Queue, Page::Review] {
+            app.page = page;
+            let output = ctx.run(egui::RawInput::default(), |ctx| app.render(ctx));
+            let mut text = String::new();
+            for shape in &output.shapes {
+                append_text(&shape.shape, &mut text);
+            }
+            assert!(text.contains("Prepare new review"));
+            assert!(!text.contains("Resume approved batch"));
+            assert!(!text.contains("Start approved batch"));
+            assert!(!text.contains("Cooldown remaining"));
+        }
+        assert!(app.rx.is_none());
+    }
+    #[test]
+    fn fresh_review_contains_only_remaining_eligible_items_without_approval() {
+        let directory = tempfile::tempdir().unwrap();
+        let engine = humble_redeemer_core::engine::Engine::new(
+            humble_redeemer_core::store::Store::open(directory.path().into(), true).unwrap(),
+            true,
+        )
+        .unwrap();
+        let mut batch = engine
+            .plan(vec!["demo-0".into(), "demo-1".into()], vec![], true)
+            .unwrap();
+        batch.cursor = 1;
+        batch.approved = true;
+        batch.state = "paused".into();
+        batch.review_required = true;
+        assert!(!batch.can_resume());
+        let snapshot = engine.snapshot().unwrap();
+        let Command::Plan {
+            game_ids,
+            choice_ids,
+            allow_reveal,
+        } = remaining_review_command(&batch, &snapshot).unwrap()
+        else {
+            panic!("Only planning is permitted")
+        };
+        assert_eq!(game_ids, vec!["demo-1"]);
+        assert!(choice_ids.is_empty());
+        assert!(allow_reveal);
+        let replacement = engine.plan(game_ids, choice_ids, allow_reveal).unwrap();
+        assert!(!replacement.approved);
+        assert_eq!(replacement.state, "review");
+        batch.cursor = 2;
+        assert!(remaining_review_command(&batch, &snapshot).is_err());
+    }
     #[test]
     fn claimed_choice_navigation_does_not_select_or_approve_any_games() {
         let mut app = App::new(true, false);
