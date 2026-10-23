@@ -78,6 +78,7 @@ jobs:
             build_home_prefix="$(cygpath -m "$HOME")"
           fi
           export RUSTFLAGS="--remap-path-prefix=$build_workspace_prefix=workspace --remap-path-prefix=$build_home_prefix=build-home"
+          echo "RUSTFLAGS=$RUSTFLAGS" >> "$GITHUB_ENV"
           cargo build --workspace --release --locked
       - name: Worker, CLI and MCP smoke
         timeout-minutes: 4

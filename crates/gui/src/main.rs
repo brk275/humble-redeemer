@@ -1040,6 +1040,7 @@ impl eframe::App for App {
                         "has_view":self.login.is_some(),
                         "worker_pending":self.rx.is_some(),
                         "snapshot_received":self.snapshot.is_some(),
+                        "fixture_probe":self.login.as_ref().and_then(|login|login.fixture_diagnostics.as_ref()),
                     });
                     let _ = std::fs::write(
                         root.join("smoke-diagnostics.json"),

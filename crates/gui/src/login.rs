@@ -21,12 +21,14 @@ pub struct Login {
     _context: WebContext,
     directory: PathBuf,
     events: mpsc::Receiver<Value>,
+    probe_sender: mpsc::Sender<Value>,
     pub provider: Provider,
     last_check: Instant,
     pub submitted: bool,
     pub message: String,
     fixture: bool,
     pub fixture_ready: bool,
+    pub fixture_diagnostics: Option<Value>,
 }
 impl Login {
     pub fn new(
@@ -43,6 +45,7 @@ impl Login {
         private_dir(&directory)?;
         let mut context = WebContext::new(Some(directory.clone()));
         let (tx, events) = mpsc::channel();
+        let probe_sender = tx.clone();
         let builder = WebViewBuilder::new_with_web_context(&mut context)
             .with_devtools(false)
             .with_clipboard(true)
@@ -53,7 +56,9 @@ impl Login {
                 position: LogicalPosition::new(220., 200.).into(),
                 size: LogicalSize::new(900., 500.).into(),
             })
-            .with_navigation_handler(move |url| allowed_navigation(provider, &url))
+            .with_navigation_handler(move |url| {
+                (fixture && fixture_origin(&url)) || allowed_navigation(provider, &url)
+            })
             .with_new_window_req_handler(|_, _| wry::NewWindowResponse::Deny)
             .with_ipc_handler(move |request| {
                 // No credentials or cookies are sent through JavaScript IPC. Cookie
@@ -71,12 +76,21 @@ impl Login {
             builder.with_additional_browser_args("")
         };
         let builder = if fixture {
-            builder.with_html("<!doctype html><html><body style='font:20px system-ui;padding:30px'><h1>Synthetic sign-in view</h1><label>Fixture text input <input id='fixture-input' autofocus aria-label='Fixture text input'></label><p>No account or network request is made.</p><script>window.fetch=async()=>({status:200,redirected:false,json:async()=>[]});window.ipc.postMessage(JSON.stringify({fixture_loaded:true}));</script></body></html>")
+            // A named in-memory origin also exercises WebView2's normal
+            // document lifecycle, rather than NavigateToString's null origin.
+            builder
+                .with_custom_protocol("hrfixture".into(), |_, _| {
+                    wry::http::Response::builder()
+                        .header("Content-Type", "text/html; charset=utf-8")
+                        .body(std::borrow::Cow::Borrowed(b"<!doctype html><html><body style='font:20px system-ui;padding:30px'><h1>Synthetic sign-in view</h1><label>Fixture text input <input id='fixture-input' autofocus aria-label='Fixture text input'></label><p>No account or network request is made.</p><script>window.fetch=async()=>({status:200,redirected:false,json:async()=>[]});window.ipc.postMessage(JSON.stringify({fixture_loaded:true}));</script></body></html>".as_slice()))
+                        .expect("static fixture response")
+                })
+                .with_url("hrfixture://localhost/login")
         } else {
             builder.with_url(provider.login())
         };
         let view=builder.build_as_child(frame).map_err(|e|anyhow!("Native sign-in could not open: {}. On Windows install Microsoft's WebView2 Runtime; on Linux use an X11/XWayland session with WebKitGTK.",safe_text(&e.to_string())))?;
-        Ok(Self{view:Some(view),_context:context,directory,events,provider,last_check:Instant::now()-Duration::from_secs(10),submitted:false,message:"Enter your credentials directly on the official page below. The app never collects passwords.".into(),fixture,fixture_ready:false})
+        Ok(Self{view:Some(view),_context:context,directory,events,probe_sender,provider,last_check:Instant::now()-Duration::from_secs(10),submitted:false,message:"Enter your credentials directly on the official page below. The app never collects passwords.".into(),fixture,fixture_ready:false,fixture_diagnostics:None})
     }
     pub fn layout(&self, rect: eframe::egui::Rect, visible: bool) {
         if let Some(view) = &self.view {
@@ -93,12 +107,24 @@ impl Login {
         let view = self.view.as_ref()?;
         if !self.submitted && self.last_check.elapsed() > Duration::from_secs(4) {
             self.last_check = Instant::now();
+            if self.fixture {
+                let sender = self.probe_sender.clone();
+                let _ = view.evaluate_script_with_callback(
+                    "({form_present:!!document.getElementById('fixture-input'),ipc_present:typeof window.ipc!=='undefined',document_ready:document.readyState==='complete'})",
+                    move |result| {
+                        let _ = sender.send(json!({"fixture_probe": result}));
+                    },
+                );
+            }
             let script = authentication_script(self.provider, self.fixture);
             if view.evaluate_script(&script).is_err() {
                 self.message="The sign-in view could not run its session check. Reload or reconnect this account.".into();
             }
         }
         while let Ok(event) = self.events.try_recv() {
+            if self.fixture && event.get("fixture_probe").is_some() {
+                self.fixture_diagnostics = Some(event["fixture_probe"].clone());
+            }
             if event["fixture_loaded"] == true {
                 self.message = "Synthetic form loaded; checking the authentication bridge…".into();
             }
@@ -162,6 +188,9 @@ impl Login {
         self.submitted = false;
         self.last_check = Instant::now() - Duration::from_secs(10);
     }
+}
+fn fixture_origin(url: &str) -> bool {
+    url == "hrfixture://localhost/login" || url == "http://hrfixture.localhost/login"
 }
 impl Drop for Login {
     fn drop(&mut self) {

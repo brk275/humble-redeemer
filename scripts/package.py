@@ -9,6 +9,7 @@ import platform
 import plistlib
 import shutil
 import subprocess
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -58,7 +59,18 @@ def main():
             applications = staging / "Applications"
             if not applications.exists():
                 applications.symlink_to("/Applications")
-            subprocess.run(["hdiutil", "create", "-volname", "Humble Redeemer", "-srcfolder", str(staging), "-ov", "-format", "UDZO", str(dmg)], check=True)
+            command = ["hdiutil", "create", "-volname", "Humble Redeemer", "-srcfolder", str(staging), "-ov", "-format", "UDZO", str(dmg)]
+            for attempt in range(5):
+                result = subprocess.run(command, capture_output=True, text=True)
+                if result.returncode == 0:
+                    print(result.stdout, end="", flush=True)
+                    break
+                # macOS image services can briefly retain a staging volume.
+                # Retry that transient condition only; never hide other errors.
+                if "Resource busy" not in result.stderr or attempt == 4:
+                    print(result.stderr, end="", flush=True)
+                    result.check_returncode()
+                time.sleep(2)
             shutil.rmtree(staging)
     elif system == "Windows":
         staging = output / "windows-stage"
