@@ -16,7 +16,7 @@ def exercise(binary_dir):
     subprocess.run([sys.executable, str(ROOT / 'scripts/smoke.py'), '--bin-dir', str(binary_dir)], check=True, timeout=120)
     suffix = '.exe' if os.name == 'nt' else ''
     with tempfile.TemporaryDirectory(prefix='hr-package-demo-') as data:
-        env = {**os.environ, 'HUMBLE_REDEEMER_DATA_DIR': data}
+        env = {**os.environ, 'HUMBLE_REDEEMER_DATA_DIR': data, 'HUMBLE_REDEEMER_TRACE':'1'}
         try:
             command = [str(binary_dir / ('humble-redeemer' + suffix)), '--smoke-test']
             if platform.system() == 'Linux': command = ['xvfb-run', '-a', *command]
@@ -26,6 +26,8 @@ def exercise(binary_dir):
             except subprocess.CalledProcessError:
                 diagnostics=Path(data)/'smoke-diagnostics.json'
                 if diagnostics.exists(): print(diagnostics.read_text(), flush=True)
+                trace=Path(data)/'worker-trace.log'
+                if trace.exists(): print(trace.read_text()[-6000:], flush=True)
                 raise
         finally:
             subprocess.run([str(binary_dir / ('hrctl' + suffix)), '--demo', 'quit', '--pause'], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)

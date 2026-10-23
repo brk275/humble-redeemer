@@ -412,7 +412,14 @@ fn constant_time_equal(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 pub fn blocking_request(demo: bool, command: Command) -> Result<Value> {
-    let runtime = tokio::runtime::Runtime::new()?;
+    // Native clients reuse their I/O driver. Named-pipe operations must not
+    // outlive a temporary runtime that is destroyed after each GUI request.
+    static RUNTIME: std::sync::OnceLock<Result<tokio::runtime::Runtime, ()>> =
+        std::sync::OnceLock::new();
+    let runtime = RUNTIME
+        .get_or_init(|| tokio::runtime::Runtime::new().map_err(|_| ()))
+        .as_ref()
+        .map_err(|_| anyhow!("Local control runtime could not start"))?;
     runtime.block_on(async {
         if !matches!(command, Command::Shutdown { .. }) {
             ensure_worker(demo).await?;

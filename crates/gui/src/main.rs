@@ -1010,9 +1010,8 @@ impl eframe::App for App {
                 self.login = None;
             }
         }
-        if self.rx.is_none()
-            && let Some(login) = &mut self.login
-            && let Some(command) = login.poll()
+        if let Some(login) = &mut self.login
+            && let Some(command) = login.poll(self.rx.is_none())
         {
             self.dispatch(command, "Verifying background session…");
         }
@@ -1023,7 +1022,14 @@ impl eframe::App for App {
         ctx.request_repaint_after(Duration::from_millis(150));
         self.frames += 1;
         if self.smoke && self.frames > 25 {
-            if !self.login_fixture || self.login.as_ref().is_some_and(|login| login.fixture_ready) {
+            let worker_ready = self
+                .snapshot
+                .as_ref()
+                .is_some_and(|s| s.demo && s.humble.connected);
+            if worker_ready
+                && (!self.login_fixture
+                    || self.login.as_ref().is_some_and(|login| login.fixture_ready))
+            {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             } else if self.smoke_started.elapsed() > Duration::from_secs(30) {
                 eprintln!("Synthetic native sign-in view did not become ready");
@@ -1032,6 +1038,8 @@ impl eframe::App for App {
                         "error":safe_text(&self.error),
                         "login_message":self.login.as_ref().map(|login|safe_text(&login.message)),
                         "has_view":self.login.is_some(),
+                        "worker_pending":self.rx.is_some(),
+                        "snapshot_received":self.snapshot.is_some(),
                     });
                     let _ = std::fs::write(
                         root.join("smoke-diagnostics.json"),

@@ -89,7 +89,7 @@ impl Login {
             }
         }
     }
-    pub fn poll(&mut self) -> Option<Command> {
+    pub fn poll(&mut self, can_submit: bool) -> Option<Command> {
         let view = self.view.as_ref()?;
         if !self.submitted && self.last_check.elapsed() > Duration::from_secs(4) {
             self.last_check = Instant::now();
@@ -127,6 +127,10 @@ impl Login {
                 self.message="The provider is showing a security check. Complete it manually on this page; the app cannot bypass it.".into();
             }
             if event["authenticated"] == true && !self.submitted {
+                if !can_submit {
+                    self.message = "Sign-in detected. Waiting for the local worker to finish its current request…".into();
+                    continue;
+                }
                 let Ok(url) = view.url() else { continue };
                 if !allowed_origin(self.provider, &url) {
                     continue;
