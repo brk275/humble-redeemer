@@ -638,14 +638,10 @@ impl Browser {
             );
         }
         Ok(response.status == 200
-            && !response.redirected
             && if self.provider == Provider::Steam {
-                self.cookies().await?.iter().any(|c| {
-                    c["name"] == "steamLoginSecure"
-                        && c["value"].as_str().is_some_and(|s| !s.is_empty())
-                })
+                verified_steam_identity(&response.body, &self.cookies().await?)
             } else {
-                response.body.is_array()
+                !response.redirected && response.body.is_array()
             })
     }
     pub async fn fetch_many(&self, paths: &[String]) -> Result<Vec<WebResponse>> {
@@ -679,6 +675,22 @@ impl Browser {
         serde_json::from_value(response)
             .map_err(|_| anyhow!("Incomplete library response; retry synchronization"))
     }
+}
+fn verified_steam_identity(body: &Value, cookies: &[Value]) -> bool {
+    let Some(html) = body.as_str() else {
+        return false;
+    };
+    let pattern = regex::Regex::new(r#"\bg_steamID\s*=\s*["']([0-9]{17})["']"#).unwrap();
+    let Some(identity) = pattern.captures(html) else {
+        return false;
+    };
+    cookies.iter().any(|cookie| {
+        cookie["name"] == "steamLoginSecure"
+            && cookie["value"].as_str().is_some_and(|value| {
+                urlencoding::decode(value)
+                    .is_ok_and(|decoded| decoded.split("||").next() == Some(&identity[1]))
+            })
+    })
 }
 impl Drop for Browser {
     fn drop(&mut self) {
@@ -726,6 +738,28 @@ mod tests {
 mod wire_tests {
     use super::*;
     use crate::fixtures::Fixture;
+    #[test]
+    fn steam_sign_in_requires_the_server_identity_to_match_the_cookie() {
+        let cookies = vec![
+            json!({"name":"steamLoginSecure","value":"12345678901234567%7C%7Csynthetic-token"}),
+        ];
+        assert!(verified_steam_identity(
+            &json!("<script>g_steamID = \"12345678901234567\";</script>"),
+            &cookies
+        ));
+        assert!(!verified_steam_identity(
+            &json!("<script>g_steamID = false;</script>Sign in"),
+            &cookies
+        ));
+        assert!(!verified_steam_identity(
+            &json!("<script>g_steamID = \"12345678901234568\";</script>"),
+            &cookies
+        ));
+        assert!(!verified_steam_identity(
+            &json!("<script>g_steamID = \"12345678901234567\";</script>"),
+            &[]
+        ));
+    }
     #[test]
     fn driver_must_match_browser_build() {
         assert!(matching_build("140.0.7339.82", "140.0.7339"));

@@ -208,7 +208,7 @@ impl NativeSession {
         Ok(WebResponse {
             status,
             body,
-            redirected: (300..400).contains(&status),
+            redirected: redirects > 0 || (300..400).contains(&status),
             retry_after,
         })
     }

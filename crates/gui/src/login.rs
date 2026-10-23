@@ -189,10 +189,15 @@ fn authentication_script(provider: Provider, fixture: bool) -> String {
     let body_check = if provider == Provider::Humble {
         "Array.isArray(await r.json().catch(()=>null))"
     } else {
-        "true"
+        r#"/\bg_steamID\s*=\s*["'][0-9]{17}["']/.test(await r.text())"#
+    };
+    let redirect_check = if provider == Provider::Humble {
+        "!r.redirected&&"
+    } else {
+        ""
     };
     format!(
-        r#"(()=>{{if({guard}){{window.ipc.postMessage(JSON.stringify({{wrong_origin:true}}));return;}}fetch({path},{{credentials:'same-origin'}}).then(async r=>{{const ok=r.status===200&&!r.redirected&&{body_check};window.ipc.postMessage(JSON.stringify({{authenticated:ok,status:r.status,user_agent:navigator.userAgent}}));}}).catch(()=>window.ipc.postMessage(JSON.stringify({{check_error:true}})));}})();"#,
+        r#"(()=>{{if({guard}){{window.ipc.postMessage(JSON.stringify({{wrong_origin:true}}));return;}}fetch({path},{{credentials:'same-origin'}}).then(async r=>{{const ok=r.status===200&&{redirect_check}{body_check};window.ipc.postMessage(JSON.stringify({{authenticated:ok,status:r.status,user_agent:navigator.userAgent}}));}}).catch(()=>window.ipc.postMessage(JSON.stringify({{check_error:true}})));}})();"#,
         path = json!(path)
     )
 }
