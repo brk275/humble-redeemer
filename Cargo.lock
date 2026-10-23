@@ -2455,6 +2455,7 @@ dependencies = [
  "serde_json",
  "winit",
  "wry",
+ "x11-dl",
  "zeroize",
 ]
 

@@ -68,9 +68,7 @@ impl Store {
         self.list("games")
     }
     pub fn game(&self, id: &str) -> Result<Game> {
-        self.games()?
-            .into_iter()
-            .find(|g| g.id == id)
+        self.lookup("games", id)?
             .ok_or_else(|| anyhow!("Game not found"))
     }
     pub fn choices(&self) -> Result<Vec<Choice>> {
@@ -91,10 +89,21 @@ impl Store {
         self.list("batches")
     }
     pub fn batch(&self, id: &str) -> Result<Batch> {
-        self.batches()?
-            .into_iter()
-            .find(|b| b.id == id)
+        self.lookup("batches", id)?
             .ok_or_else(|| anyhow!("Batch not found"))
+    }
+    fn lookup<T: DeserializeOwned>(&self, table: &str, id: &str) -> Result<Option<T>> {
+        let metadata: Option<String> = self
+            .db
+            .query_row(
+                &format!("SELECT metadata FROM {table} WHERE id=?1"),
+                [id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        metadata
+            .map(|json| Ok(serde_json::from_str(&json)?))
+            .transpose()
     }
     pub fn put_batch(&self, b: &Batch) -> Result<()> {
         self.db.execute(

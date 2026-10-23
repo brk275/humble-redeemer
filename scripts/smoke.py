@@ -18,17 +18,33 @@ def main():
     folder = Path(args.bin_dir).resolve()
     executable = folder / ("hrctl.exe" if os.name == "nt" else "hrctl")
     with tempfile.TemporaryDirectory(prefix="hr-synthetic-") as data:
-        env = {**os.environ, "HUMBLE_REDEEMER_DATA_DIR": data}
+        env = {**os.environ, "HUMBLE_REDEEMER_DATA_DIR": data, "HUMBLE_REDEEMER_TRACE": "1"}
+        def run_cli(arguments, timeout=60):
+            # Disk-backed capture avoids inherited Windows pipe handles keeping
+            # communicate() alive after a timed-out child has been killed.
+            with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
+                child = subprocess.Popen([str(executable), "--demo", "--json", *arguments], env=env, stdout=output, stderr=errors)
+                try: code = child.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    child.kill(); child.wait(timeout=10)
+                    trace = Path(data) / 'worker-trace.log'
+                    if trace.exists(): print(trace.read_text()[-8000:], flush=True)
+                    raise RuntimeError('CLI timed out: ' + arguments[0])
+                output.seek(0); errors.seek(0)
+                result = output.read().decode(); error = errors.read().decode()
+                return code, result, error
         def cli(*arguments):
             print("Checking CLI " + arguments[0], flush=True)
-            return json.loads(subprocess.check_output([str(executable), "--demo", "--json", *arguments], env=env, text=True, timeout=60))
+            code, result, error = run_cli(arguments)
+            if code: raise RuntimeError('CLI failed: ' + error)
+            return json.loads(result)
         mcp = None
         try:
             state = cli("status")
             assert state["demo"] and state["humble"]["connected"]
             plan = cli("plan", "--games", "demo-0")
-            denied = subprocess.run([str(executable), "--demo", "batch", "start", plan["id"]], env=env, capture_output=True, timeout=30)
-            assert denied.returncode != 0
+            denied, _, _ = run_cli(['batch', 'start', plan['id']], timeout=30)
+            assert denied != 0
             cli("batch", "approve", plan["id"], "--digest", plan["digest"])
             cli("batch", "start", plan["id"])
             for _ in range(12):
@@ -76,7 +92,8 @@ def main():
                 mcp.terminate()
                 try: mcp.wait(timeout=10)
                 except subprocess.TimeoutExpired: mcp.kill(); mcp.wait(timeout=10)
-            subprocess.run([str(executable), "--demo", "quit", "--pause"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+            try: run_cli(['quit', '--pause'], timeout=10)
+            except RuntimeError: pass
             time.sleep(0.5)
 
 

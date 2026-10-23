@@ -108,6 +108,7 @@ impl NativeSession {
         if url.origin().ascii_serialization() != self.provider.origin() {
             bail!("Untrusted service origin");
         }
+        let is_get = payload.is_none();
         let mut request = if let Some(payload) = payload {
             let fields = payload
                 .as_object()
@@ -137,10 +138,31 @@ impl NativeSession {
             self.client.get(url)
         };
         request = request.header(header::REFERER, self.provider.origin());
-        let response = request
-            .send()
-            .await
-            .map_err(|_| anyhow!("Service request interrupted; reconcile before retrying"))?;
+        let mut redirects = 0;
+        let response = loop {
+            let response = request
+                .send()
+                .await
+                .map_err(|_| anyhow!("Service request interrupted; reconcile before retrying"))?;
+            // Read-only provider pages can move within their official origin.
+            // Never replay a reveal, claim or activation after a redirect.
+            if is_get
+                && response.status().is_redirection()
+                && let Some(location) = response.headers().get(header::LOCATION)
+            {
+                if redirects >= 5 {
+                    bail!("Service page redirected too many times; reconnect and retry");
+                }
+                let target = redirect_target(response.url(), location, self.provider)?;
+                request = self
+                    .client
+                    .get(target)
+                    .header(header::REFERER, self.provider.origin());
+                redirects += 1;
+                continue;
+            }
+            break response;
+        };
         {
             let mut originals = self
                 .originals
@@ -191,6 +213,24 @@ impl NativeSession {
         })
     }
 }
+fn redirect_target(
+    current: &reqwest::Url,
+    location: &header::HeaderValue,
+    provider: Provider,
+) -> Result<reqwest::Url> {
+    let target = location
+        .to_str()
+        .ok()
+        .and_then(|s| current.join(s).ok())
+        .ok_or_else(|| anyhow!("Service returned an invalid redirect"))?;
+    if target.origin().ascii_serialization() != provider.origin()
+        || !target.username().is_empty()
+        || target.password().is_some()
+    {
+        bail!("Service redirected outside its official origin; reconnect in the app");
+    }
+    Ok(target)
+}
 fn retry_delay(value: &str) -> Option<u64> {
     value.trim().parse().ok().or_else(|| {
         httpdate::parse_http_date(value).ok().map(|t| {
@@ -217,5 +257,32 @@ mod tests {
             .unwrap()
                 >= 7198
         );
+    }
+    #[test]
+    fn read_only_redirects_stay_on_the_official_origin() {
+        let current =
+            reqwest::Url::parse("https://www.humblebundle.com/subscription/fixture").unwrap();
+        let target = redirect_target(
+            &current,
+            &header::HeaderValue::from_static("/membership/fixture"),
+            Provider::Humble,
+        )
+        .unwrap();
+        assert_eq!(target.path(), "/membership/fixture");
+        for location in [
+            "https://example.invalid/",
+            "//example.invalid/",
+            "http://www.humblebundle.com/",
+            "https://user@www.humblebundle.com/",
+        ] {
+            assert!(
+                redirect_target(
+                    &current,
+                    &header::HeaderValue::from_str(location).unwrap(),
+                    Provider::Humble
+                )
+                .is_err()
+            );
+        }
     }
 }

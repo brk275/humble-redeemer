@@ -162,6 +162,47 @@ impl Engine {
         let s = self.store.get_setting("steam")?.unwrap_or_default();
         Ok(hex::encode(Sha256::digest(format!("{h}|{s}"))))
     }
+    fn bind_session(&self, provider: Provider, binding: &str) -> Result<()> {
+        if provider == Provider::Steam
+            && self.store.get_setting("steam")?.as_deref() != Some(binding)
+        {
+            // An ownership result belongs to the account checked at that time.
+            // Historical activations remain history, but a new session must
+            // obtain fresh ownership evidence before skipping an unused key.
+            for mut game in self.store.games()? {
+                if game.outcome == Outcome::AlreadyOwned {
+                    game.outcome = if game.has_key {
+                        Outcome::Ready
+                    } else {
+                        Outcome::Unrevealed
+                    };
+                    game.reason =
+                        "Ownership needs verification for the connected Steam session.".into();
+                    self.store.put_game(&game)?;
+                }
+            }
+        }
+        self.store.setting(provider.name(), binding)
+    }
+    fn session_binding(&self, provider: Provider, cookies: &[Value]) -> String {
+        let mut identities: Vec<_> = cookies
+            .iter()
+            .map(|cookie| {
+                json!([
+                    cookie["name"],
+                    cookie["domain"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .trim_start_matches('.'),
+                    cookie["path"],
+                    cookie["value"]
+                ])
+                .to_string()
+            })
+            .collect();
+        identities.sort();
+        self.id(provider.name(), &identities.join("\n"))
+    }
     fn id(&self, scope: &str, source: &str) -> String {
         self.store
             .vault
@@ -227,7 +268,7 @@ impl Engine {
                     );
                 }
                 let cookies = browser.cookies().await?;
-                let binding = self.store.vault.fingerprint(&serde_json::to_vec(&cookies)?);
+                let binding = self.session_binding(provider, &cookies);
                 self.store.put_secret(
                     &format!("native-session:{}", provider.name()),
                     &SavedSession {
@@ -235,7 +276,7 @@ impl Engine {
                         user_agent,
                     },
                 )?;
-                self.store.setting(provider.name(), &binding)?;
+                self.bind_session(provider, &binding)?;
                 self.browsers.insert(provider, browser);
                 self.connections.insert(
                     provider,
@@ -551,11 +592,10 @@ impl Engine {
                     match result {
                         Ok(true) => {
                             let cookies = self.browsers[&provider].cookies().await?;
-                            let binding =
-                                self.store.vault.fingerprint(&serde_json::to_vec(&cookies)?);
+                            let binding = self.session_binding(provider, &cookies);
                             self.store
                                 .put_secret(&format!("session:{}", provider.name()), &cookies)?;
-                            self.store.setting(provider.name(), &binding)?;
+                            self.bind_session(provider, &binding)?;
                             let c = self.connections.get_mut(&provider).unwrap();
                             c.connected = true;
                             c.signing_in = false;
@@ -865,7 +905,6 @@ impl Engine {
             if !matches!(
                 other.outcome,
                 Outcome::Redeemed
-                    | Outcome::AlreadyOwned
                     | Outcome::UsedElsewhere
                     | Outcome::LegacyRedeemed
                     | Outcome::LegacyOwnedOrUsed
@@ -884,13 +923,57 @@ impl Engine {
                 if matches!(other.outcome, Outcome::UnknownOutcome | Outcome::InFlight) {
                     return Ok(Some(Outcome::UnknownOutcome));
                 }
-                confirmed = Some(match other.outcome {
-                    Outcome::Redeemed | Outcome::LegacyRedeemed => Outcome::AlreadyOwned,
-                    outcome => outcome,
-                });
+                confirmed = strongest_key_history(confirmed, other.outcome);
             }
         }
         Ok(confirmed)
+    }
+    fn reconcile_key_history(&self) -> Result<()> {
+        let games = self.store.games()?;
+        let mut history = HashMap::new();
+        for game in &games {
+            if !matches!(
+                game.outcome,
+                Outcome::Redeemed
+                    | Outcome::UsedElsewhere
+                    | Outcome::LegacyRedeemed
+                    | Outcome::LegacyOwnedOrUsed
+                    | Outcome::UnknownOutcome
+                    | Outcome::InFlight
+            ) {
+                continue;
+            }
+            if let Some(key) = self
+                .store
+                .secret::<PrivateGame>(&format!("game:{}", game.id))?
+                .and_then(|p| p.key)
+            {
+                let fingerprint = self.id("key-history", &key);
+                let outcome = if game.outcome == Outcome::InFlight {
+                    Outcome::UnknownOutcome
+                } else {
+                    game.outcome
+                };
+                if let Some(result) =
+                    strongest_key_history(history.get(&fingerprint).copied(), outcome)
+                {
+                    history.insert(fingerprint, result);
+                }
+            }
+        }
+        for mut game in games.into_iter().filter(|g| g.outcome.eligible()) {
+            if let Some(key) = self
+                .store
+                .secret::<PrivateGame>(&format!("game:{}", game.id))?
+                .and_then(|p| p.key)
+                && let Some(outcome) = history.get(&self.id("key-history", &key))
+            {
+                game.outcome = *outcome;
+                game.reason = "Exact key matched recorded history; no activation was sent. Legacy history does not establish current account ownership.".into();
+                self.store.put_game(&game)?;
+            }
+        }
+        Ok(())
     }
     async fn refresh_owned(&mut self) -> Result<()> {
         let response = self
@@ -962,7 +1045,7 @@ impl Engine {
         for order in &orders {
             self.ingest_order(order)?;
         }
-        self.sync_choices(&orders).await?;
+        self.reconcile_key_history()?;
         if self.connections[&Provider::Steam].connected {
             self.refresh_owned().await?;
             for mut game in self.store.games()? {
@@ -974,6 +1057,7 @@ impl Engine {
                 }
             }
         }
+        self.sync_choices(&orders).await?;
         self.message = format!(
             "Library synchronized: {} recorded items, {} available Choice entries.",
             self.store.games()?.len(),
@@ -1078,9 +1162,17 @@ impl Engine {
                 })
                 .collect();
             let responses = self.connected(Provider::Humble)?.fetch_many(&paths).await?;
+            if responses.len() != chunk.len() {
+                bail!(
+                    "Choice sync was incomplete. Existing choices were preserved; retry synchronization."
+                );
+            }
             for (order, response) in chunk.iter().zip(responses) {
                 if response.status != 200 {
-                    bail!("Choice availability could not be fully verified; retry sync")
+                    bail!(
+                        "Choice availability could not be fully verified (HTTP {}). Library records were preserved; retry sync.",
+                        response.status
+                    )
                 }
                 let text = response.body.as_str().unwrap_or_default();
                 let Some(capture) = re.captures(text) else {
@@ -1389,6 +1481,26 @@ impl Engine {
         Ok(())
     }
 }
+fn strongest_key_history(previous: Option<Outcome>, next: Outcome) -> Option<Outcome> {
+    fn rank(outcome: Outcome) -> u8 {
+        match outcome {
+            Outcome::UnknownOutcome | Outcome::InFlight => 5,
+            Outcome::Redeemed => 4,
+            Outcome::UsedElsewhere => 3,
+            Outcome::LegacyRedeemed => 2,
+            Outcome::LegacyOwnedOrUsed => 1,
+            _ => 0,
+        }
+    }
+    if rank(next) == 0 {
+        return previous;
+    }
+    if previous.is_some_and(|p| rank(p) >= rank(next)) {
+        previous
+    } else {
+        Some(next)
+    }
+}
 fn cooldown_deadline(retry_after: Option<u64>) -> i64 {
     now().saturating_add(i64::try_from(retry_after.unwrap_or(3600).max(60)).unwrap_or(i64::MAX))
 }
@@ -1671,6 +1783,76 @@ mod regression_tests {
             Outcome::UsedElsewhere
         );
         assert_eq!(e.store.batch(&b.id).unwrap().cursor, 1);
+    }
+    #[tokio::test]
+    async fn duplicate_history_does_not_invent_current_account_ownership() {
+        for recorded in [
+            Outcome::LegacyRedeemed,
+            Outcome::LegacyOwnedOrUsed,
+            Outcome::Redeemed,
+        ] {
+            let (_d, mut e, _f, b) = live_fixture(Value::Null).await;
+            let mut history = e.store.game("demo-3").unwrap();
+            history.outcome = recorded;
+            e.store.put_game(&history).unwrap();
+            e.store
+                .put_secret(
+                    "game:demo-3",
+                    &PrivateGame {
+                        key: Some("AAAAA-BBBBB-CCCCC".into()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            e.browsers.clear();
+            e.tick().await.unwrap();
+            assert_eq!(e.store.game("demo-0").unwrap().outcome, recorded);
+            assert_eq!(e.store.batch(&b.id).unwrap().cursor, 1);
+        }
+    }
+    #[tokio::test]
+    async fn owned_unused_key_is_rechecked_after_session_change() {
+        let (_d, mut e, _f, _b) = live_fixture(Value::Null).await;
+        e.store
+            .put_secret(
+                "game:demo-2",
+                &PrivateGame {
+                    key: Some("AAAAA-BBBBB-CCCCC".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            e.duplicate_outcome("demo-0", "AAAAA-BBBBB-CCCCC").unwrap(),
+            None
+        );
+        e.bind_session(Provider::Steam, "new-session").unwrap();
+        assert_eq!(e.store.game("demo-2").unwrap().outcome, Outcome::Ready);
+    }
+    #[tokio::test]
+    async fn sync_reconciles_exact_keys_and_preserves_legacy_ambiguity() {
+        let (_d, mut e, _f, _b) = live_fixture(Value::Null).await;
+        let mut history = e.store.game("demo-3").unwrap();
+        history.outcome = Outcome::LegacyOwnedOrUsed;
+        e.store.put_game(&history).unwrap();
+        e.store
+            .put_secret(
+                "game:demo-3",
+                &PrivateGame {
+                    key: Some("AAAAA-BBBBB-CCCCC".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        e.reconcile_key_history().unwrap();
+        assert_eq!(
+            e.store.game("demo-0").unwrap().outcome,
+            Outcome::LegacyOwnedOrUsed
+        );
+        assert_eq!(
+            e.store.game("demo-3").unwrap().outcome,
+            Outcome::LegacyOwnedOrUsed
+        );
     }
     #[test]
     fn export_does_not_overwrite_and_defaults_to_no_keys() {

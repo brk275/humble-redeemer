@@ -33,6 +33,22 @@ struct Envelope {
     token: String,
     command: Command,
 }
+fn trace(stage: &str) {
+    if std::env::var("HUMBLE_REDEEMER_TRACE").as_deref() == Ok("1") {
+        eprintln!("Local IPC: {stage}");
+        // Opt-in synthetic diagnostics contain fixed stage labels only.
+        if let Some(root) = std::env::var_os("HUMBLE_REDEEMER_DATA_DIR") {
+            use std::io::Write;
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(Path::new(&root).join("worker-trace.log"))
+            {
+                let _ = writeln!(file, "{stage}");
+            }
+        }
+    }
+}
 fn socket_name(root: &Path) -> Result<Name<'static>> {
     #[cfg(unix)]
     {
@@ -78,9 +94,11 @@ pub async fn request(demo: bool, command: Command) -> Result<Value> {
     request_at(&data_root(demo)?, command).await
 }
 pub async fn request_at(root: &Path, command: Command) -> Result<Value> {
+    trace("connecting");
     let conn = Stream::connect(socket_name(root)?)
         .await
         .map_err(|_| anyhow!("Worker unavailable. Start Humble Redeemer or run hrctl worker."))?;
+    trace("connected");
     let mut sender = &conn;
     let mut bytes = serde_json::to_vec(&Envelope {
         token: token(root)?,
@@ -89,6 +107,7 @@ pub async fn request_at(root: &Path, command: Command) -> Result<Value> {
     bytes.push(b'\n');
     sender.write_all(&bytes).await?;
     sender.flush().await?;
+    trace("request written");
     let mut reader = BufReader::new(&conn);
     let mut line = String::new();
     tokio::time::timeout(Duration::from_secs(300), reader.read_line(&mut line))
@@ -96,6 +115,7 @@ pub async fn request_at(root: &Path, command: Command) -> Result<Value> {
         .map_err(|_| {
             anyhow!("Operation is still running; check status before trying it again")
         })??;
+    trace("response read");
     let value: Value =
         serde_json::from_str(&line).map_err(|_| anyhow!("Worker returned an invalid response"))?;
     if value["ok"] != true {
@@ -104,6 +124,7 @@ pub async fn request_at(root: &Path, command: Command) -> Result<Value> {
     Ok(value["result"].clone())
 }
 pub async fn ensure_worker(demo: bool) -> Result<()> {
+    trace("checking worker");
     if request(demo, Command::Snapshot).await.is_ok() {
         return Ok(());
     }
@@ -138,6 +159,7 @@ pub async fn ensure_worker(demo: bool) -> Result<()> {
     command.spawn().map_err(|_| {
         anyhow!("Could not launch the bundled worker. Ensure hrctl is installed beside the GUI.")
     })?;
+    trace("worker spawned");
     for _ in 0..100 {
         tokio::time::sleep(Duration::from_millis(150)).await;
         if request(demo, Command::Snapshot).await.is_ok() {
@@ -147,6 +169,7 @@ pub async fn ensure_worker(demo: bool) -> Result<()> {
     bail!("Worker did not start. Unlock your system keyring and try again.")
 }
 pub async fn serve(demo: bool) -> Result<()> {
+    trace("worker initializing");
     let root = data_root(demo)?;
     private_dir(&root)?;
     let lock = std::fs::OpenOptions::new()
@@ -178,6 +201,7 @@ pub async fn serve(demo: bool) -> Result<()> {
     }
     let expected = token(&root)?;
     let engine = Arc::new(Mutex::new(Engine::new(Store::open(root, demo)?, demo)?));
+    trace("worker ready");
     let tick_engine = engine.clone();
     let ticking = tokio::spawn(async move {
         loop {
@@ -212,12 +236,14 @@ async fn handle_connection(
     expected: String,
 ) -> Result<()> {
     let mut receiver = BufReader::new(&conn).take(65536);
+    trace("worker accepted connection");
     let mut bytes = Vec::new();
     tokio::time::timeout(
         Duration::from_secs(15),
         receiver.read_until(b'\n', &mut bytes),
     )
     .await??;
+    trace("worker read request");
     if bytes.len() >= 65536 {
         return Ok(());
     }

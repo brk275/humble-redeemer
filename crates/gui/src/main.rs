@@ -933,6 +933,14 @@ impl App {
     }
 }
 impl eframe::App for App {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // Dispose the child view while its native parent still exists.
+        self.login = None;
+        #[cfg(target_os = "linux")]
+        while gtk::events_pending() {
+            gtk::main_iteration_do(false);
+        }
+    }
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         #[cfg(target_os = "linux")]
         while gtk::events_pending() {
@@ -1075,6 +1083,14 @@ fn main() -> eframe::Result {
     gtk::gdk::set_allowed_backends("x11");
     #[cfg(target_os = "linux")]
     gtk::init().map_err(|error| eframe::Error::AppCreation(Box::new(error)))?;
+    #[cfg(target_os = "linux")]
+    winit::platform::x11::register_xlib_error_hook(Box::new(|_, error| {
+        // Wry's official winit integration handles this queued GLXBadWindow
+        // error from WebKit's shared X11 connection the same way:
+        // https://github.com/tauri-apps/wry/blob/dev/examples/winit.rs
+        // SAFETY: winit supplies a valid XErrorEvent for this callback.
+        unsafe { (*(error.cast::<x11_dl::xlib::XErrorEvent>())).error_code == 170 }
+    }));
     eframe::run_native(
         if login_fixture {
             "Humble Redeemer — Demo sign-in"
