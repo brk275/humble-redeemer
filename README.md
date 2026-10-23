@@ -19,7 +19,7 @@ A native Rust desktop app for managing Humble Bundle keys and activating them on
 
 Download your platform's installer from [GitHub Releases](https://github.com/brk275/humble-redeemer/releases). Initial packages are **unsigned by a publisher**; macOS bundles have an ad-hoc signature, not Apple notarization. A signature or release download alone is not proof of live account testing. See [verification status](docs/VERIFICATION.md).
 
-Targets: macOS Apple Silicon and Intel, Windows x64, Linux x64 (Ubuntu 22.04 baseline). Linux needs a desktop session, OpenGL, D-Bus and a Secret Service provider for persistent secrets. File dialogs use the desktop portal. Keep `hrctl` beside the GUI executable.
+Targets: macOS Apple Silicon and Intel, Windows x64, Linux x64 (Ubuntu 22.04 baseline). Linux needs a desktop session, OpenGL, D-Bus, libxkbcommon-x11 and a Secret Service provider for persistent secrets. File dialogs use the desktop portal. Keep `hrctl` beside the GUI executable.
 
 Install Firefox or Chrome. The app provisions a matching driver from Mozilla or Google. The browser and driver are external native programs; **Python, Node and Selenium's Python package are not runtime dependencies**.
 

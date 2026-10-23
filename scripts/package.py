@@ -106,7 +106,7 @@ def main():
             icon_dir.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / "assets/icon.svg", icon_dir / "humble-redeemer.svg")
             (deb / "DEBIAN").mkdir(exist_ok=True)
-            (deb / "DEBIAN/control").write_text(f"Package: humble-redeemer\nVersion: {version}\nArchitecture: amd64\nMaintainer: brk275 <88346297+brk275@users.noreply.github.com>\nDepends: libdbus-1-3, libx11-6, libxkbcommon0, libgl1, libfontconfig1\nDescription: Private native Rust Humble-to-Steam key manager\n")
+            (deb / "DEBIAN/control").write_text(f"Package: humble-redeemer\nVersion: {version}\nArchitecture: amd64\nMaintainer: brk275 <88346297+brk275@users.noreply.github.com>\nDepends: libdbus-1-3, libx11-6, libxkbcommon0, libxkbcommon-x11-0, libgl1, libfontconfig1\nDescription: Private native Rust Humble-to-Steam key manager\n")
             subprocess.run(["dpkg-deb", "--root-owner-group", "--build", str(deb), str(output / f"humble-redeemer_{version}_amd64.deb")], check=True)
             shutil.rmtree(deb)
     else:
