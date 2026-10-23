@@ -238,6 +238,9 @@ pub enum Command {
         user_agent: String,
     },
     Sync,
+    Ownership {
+        app_ids: Vec<u32>,
+    },
     Plan {
         game_ids: Vec<String>,
         choice_ids: Vec<String>,

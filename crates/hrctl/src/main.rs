@@ -19,6 +19,10 @@ enum Action {
     Worker,
     Mcp,
     Sync,
+    Ownership {
+        #[arg(long, value_delimiter = ',', required = true)]
+        apps: Vec<u32>,
+    },
     Connect {
         #[arg(value_parser=["humble","steam"])]
         provider: String,
@@ -122,6 +126,9 @@ async fn run(args: Args) -> anyhow::Result<()> {
             provider: parse_provider(provider),
         },
         Action::Sync => Command::Sync,
+        Action::Ownership { ref apps } => Command::Ownership {
+            app_ids: apps.clone(),
+        },
         Action::Plan {
             ref games,
             ref choices,

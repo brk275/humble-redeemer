@@ -11,7 +11,9 @@ codex mcp list
 
 Enable the server in desktop MCP settings and reload the client when required. Configure write-tool approvals according to your client's policy; treat `approve_batch` and `control_batch` as consequential writes. Read-only tool annotations are supplied for status, library and Choice listings.
 
-Tools: `status`, `library`, `choices`, `report`, `synchronize`, `connect_account`, `plan_batch`, `approve_batch`, `control_batch`.
+Tools: `status`, `library`, `ownership`, `choices`, `report`, `synchronize`, `connect_account`, `plan_batch`, `approve_batch`, `control_batch`.
+
+`ownership` accepts an `app_ids` array and returns freshly verified, exact Steam app IDs and ownership booleans. The CLI equivalent is `hrctl --json ownership --apps 100,101`. An incomplete ownership response fails instead of treating missing data as unowned. This operation does not reveal keys or approve a batch.
 
 Use `library` with `{"choice_only":true,"eligible_only":true}` to find already claimed Choice keys that still need review or Steam activation. `choices` lists unclaimed monthly selections. A Humble claim or revealed key does not establish a successful Steam activation.
 

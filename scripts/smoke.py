@@ -105,7 +105,7 @@ def main():
             rpc({"jsonrpc": "2.0", "method": "notifications/initialized"})
             tools = rpc({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
             names = {t["name"] for t in tools["result"]["tools"]}
-            assert {"status", "plan_batch", "approve_batch", "control_batch"} <= names
+            assert {"status", "ownership", "plan_batch", "approve_batch", "control_batch"} <= names
             assert not any("password" in name or "reveal_key" in name for name in names)
             status = rpc({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "status", "arguments": {}}})
             payload = json.loads(status["result"]["content"][0]["text"])
@@ -115,6 +115,11 @@ def main():
             claimed_cli = cli('library', '--choice-only', '--eligible-only')
             assert claimed_mcp == claimed_cli
             assert {g['id'] for g in claimed_mcp['games']} == {'demo-1'}
+            ownership_rpc = rpc({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"ownership","arguments":{"app_ids":[101,100,100]}}})
+            ownership_mcp = json.loads(ownership_rpc['result']['content'][0]['text'])
+            ownership_cli = cli('ownership', '--apps', '100,101')
+            assert ownership_mcp['apps'] == ownership_cli['apps']
+            assert [app['app_id'] for app in ownership_mcp['apps']] == [100,101]
             mcp.stdin.close()
             mcp.wait(timeout=10)
             print("PASS: native IPC, approval gate, queue completion, redacted export, official SDK MCP handshake/tools/status")

@@ -364,6 +364,23 @@ impl Engine {
                     self.sync().await?;
                 }
             }
+            Command::Ownership { mut app_ids } => {
+                if app_ids.is_empty() || app_ids.len() > 2000 || app_ids.contains(&0) {
+                    bail!("Supply between 1 and 2000 valid Steam app IDs");
+                }
+                app_ids.sort_unstable();
+                app_ids.dedup();
+                if !self.demo {
+                    if !self.connected(Provider::Steam)?.authenticated().await? {
+                        bail!("Steam sign-in could not be verified; ownership is unknown");
+                    }
+                    self.refresh_owned().await?;
+                    self.persist_native_sessions()?;
+                }
+                return Ok(
+                    json!({"apps":app_ids.into_iter().map(|app_id|json!({"app_id":app_id,"owned":self.owned.contains(&app_id)})).collect::<Vec<_>>(),"checked_at":now()}),
+                );
+            }
             Command::Plan {
                 game_ids,
                 choice_ids,
@@ -1826,6 +1843,62 @@ mod tests {
 mod regression_tests {
     use super::*;
     use crate::fixtures::Fixture;
+    #[tokio::test]
+    async fn ownership_query_is_exact_bounded_and_does_not_approve_a_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut e = Engine::new(Store::open(dir.path().into(), true).unwrap(), true).unwrap();
+        e.owned.insert(100);
+        let result = e
+            .handle(Command::Ownership {
+                app_ids: vec![101, 100, 100],
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            result["apps"],
+            json!([{"app_id":100,"owned":true},{"app_id":101,"owned":false}])
+        );
+        assert!(e.store.batches().unwrap().is_empty());
+        assert!(
+            e.handle(Command::Ownership { app_ids: vec![0] })
+                .await
+                .is_err()
+        );
+        assert!(
+            e.handle(Command::Ownership { app_ids: vec![] })
+                .await
+                .is_err()
+        );
+    }
+    #[tokio::test]
+    async fn partial_live_ownership_is_never_reported_as_not_owned() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut e = Engine::new(Store::open(dir.path().into(), true).unwrap(), true).unwrap();
+        let mut fixture = Fixture::new(Provider::Steam, |path, body| match path {
+            "url" => json!(Provider::Steam.origin()),
+            "cookie" => {
+                json!([{"name":"steamLoginSecure","value":"12345678901234567%7C%7Cfixture"}])
+            }
+            "execute/async" if body["args"][0] == "/account/registerkey" => {
+                json!({"status":200,"body":"<script>g_steamID = \"12345678901234567\";</script>"})
+            }
+            "execute/async" => {
+                json!({"status":200,"body":{"rgOwnedApps":[100,"incomplete-fixture"]}})
+            }
+            _ => Value::Null,
+        })
+        .await;
+        e.browsers
+            .insert(Provider::Steam, fixture.browser.take().unwrap());
+        e.demo = false;
+        assert!(
+            e.handle(Command::Ownership { app_ids: vec![101] })
+                .await
+                .is_err()
+        );
+        assert!(!e.owned_checked);
+        assert!(e.store.batches().unwrap().is_empty());
+    }
     #[test]
     fn rotating_cookies_preserve_approval_only_for_the_same_steam_account() {
         let dir = tempfile::tempdir().unwrap();
