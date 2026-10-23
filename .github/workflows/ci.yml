@@ -68,6 +68,12 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Unit and state-machine tests
         run: cargo test --workspace --locked
+      - name: Windows sign-in fixture before optimization
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cargo build --workspace --locked
+          python -c "import sys; sys.path.insert(0, 'scripts'); from pathlib import Path; from package_smoke import exercise; exercise(Path('target/debug').resolve())"
       - name: Build release
         shell: bash
         run: |

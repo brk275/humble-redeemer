@@ -224,16 +224,23 @@ pub async fn serve(demo: bool) -> Result<()> {
             }
         }
     });
+    let mut connections = tokio::task::JoinSet::new();
     loop {
         tokio::select! {
             result=listener.accept()=>{
                 let conn=result?;let engine=engine.clone();let expected=expected.clone();
-                tokio::spawn(async move{let _=handle_connection(conn,engine,expected).await;});
+                connections.spawn(async move{let _=handle_connection(conn,engine,expected).await;});
             }
             _=tokio::time::sleep(Duration::from_millis(200))=>{if engine.lock().await.shutdown{break}}
+            _=connections.join_next(), if !connections.is_empty()=>{}
         }
     }
     ticking.abort();
+    let _ = ticking.await;
+    // Finish the shutdown acknowledgement and any bounded local reads before
+    // releasing the database and then the single-worker lock.
+    while connections.join_next().await.is_some() {}
+    drop(engine);
     drop(listener);
     drop(lock);
     Ok(())

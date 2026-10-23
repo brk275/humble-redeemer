@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from smoke import SettledTemporaryDirectory
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -15,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def exercise(binary_dir):
     subprocess.run([sys.executable, str(ROOT / 'scripts/smoke.py'), '--bin-dir', str(binary_dir)], check=True, timeout=120)
     suffix = '.exe' if os.name == 'nt' else ''
-    with tempfile.TemporaryDirectory(prefix='hr-package-demo-') as data:
+    with SettledTemporaryDirectory(prefix='hr-package-demo-') as data:
         env = {**os.environ, 'HUMBLE_REDEEMER_DATA_DIR': data, 'HUMBLE_REDEEMER_TRACE':'1'}
         try:
             command = [str(binary_dir / ('humble-redeemer' + suffix)), '--smoke-test']
@@ -39,7 +40,7 @@ def main():
     parser.add_argument('--dist', type=Path, default=ROOT / 'dist')
     args = parser.parse_args()
     folder = args.dist.resolve()
-    with tempfile.TemporaryDirectory(prefix='hr-install-check-') as temp:
+    with SettledTemporaryDirectory(prefix='hr-install-check-') as temp:
         temporary = Path(temp)
         system = platform.system()
         if system == 'Darwin':

@@ -11,13 +11,26 @@ import threading
 import time
 
 
+class SettledTemporaryDirectory(tempfile.TemporaryDirectory):
+    def cleanup(self):
+        # Windows releases process/database handles asynchronously after quit.
+        for attempt in range(40):
+            try:
+                super().cleanup()
+                return
+            except PermissionError:
+                if attempt == 39:
+                    raise
+                time.sleep(0.25)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--bin-dir", default="target/debug")
     args = parser.parse_args()
     folder = Path(args.bin_dir).resolve()
     executable = folder / ("hrctl.exe" if os.name == "nt" else "hrctl")
-    with tempfile.TemporaryDirectory(prefix="hr-synthetic-") as data:
+    with SettledTemporaryDirectory(prefix="hr-synthetic-") as data:
         env = {**os.environ, "HUMBLE_REDEEMER_DATA_DIR": data, "HUMBLE_REDEEMER_TRACE": "1"}
         def run_cli(arguments, timeout=60):
             # Disk-backed capture avoids inherited Windows pipe handles keeping
