@@ -122,13 +122,15 @@ impl App {
         self.busy = "Starting approved batch…".into();
         std::thread::spawn(move || {
             let result = (|| {
-                ipc::blocking_request(
-                    demo,
-                    Command::Approve {
-                        batch_id: batch.id.clone(),
-                        digest: batch.digest,
-                    },
-                )?;
+                if !batch.approved {
+                    ipc::blocking_request(
+                        demo,
+                        Command::Approve {
+                            batch_id: batch.id.clone(),
+                            digest: batch.digest,
+                        },
+                    )?;
+                }
                 ipc::blocking_request(demo, Command::Start { batch_id: batch.id })
             })()
             .map_err(|e: anyhow::Error| safe_text(&e.to_string()));
@@ -168,6 +170,13 @@ impl App {
                                 snapshot.batches.iter().find(|b| b.id == review.id)
                         {
                             *review = current.clone();
+                        } else if self.review.is_none() {
+                            self.review = snapshot
+                                .batches
+                                .iter()
+                                .rev()
+                                .find(|b| b.state == "review")
+                                .cloned();
                         }
                         self.snapshot = Some(snapshot);
                     }
@@ -742,9 +751,14 @@ impl App {
         ui.monospace(format!("Batch {}", batch.id));
         ui.label(RichText::new(format!("State: {}", batch.state)).color(MUTED));
         ui.add_space(12.);
-        if ["review", "approved", "paused"].contains(&batch.state.as_str())
-            && primary(ui, "Approve this batch and start", self.rx.is_none())
-        {
+        let can_start = batch.state == "review"
+            || (batch.approved && ["approved", "paused"].contains(&batch.state.as_str()));
+        let action = if batch.approved {
+            "Start approved batch"
+        } else {
+            "Approve this batch and start"
+        };
+        if can_start && primary(ui, action, self.rx.is_none()) {
             self.approve_start(batch);
             self.page = Page::Queue;
         }
@@ -793,6 +807,10 @@ impl App {
                     }
                     ui.label(RichText::new(&batch.message).small().color(MUTED));
                     ui.horizontal(|ui| {
+                        if ui.button("Review items").clicked() {
+                            self.review = Some(batch.clone());
+                            self.page = Page::Review;
+                        }
                         if ["running", "cooldown"].contains(&batch.state.as_str())
                             && ui.button("Pause").clicked()
                         {
