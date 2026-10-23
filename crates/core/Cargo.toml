@@ -1,0 +1,46 @@
+[package]
+name = "humble-redeemer-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+reqwest.workspace = true
+rusqlite = { version = "0.37", features = ["bundled"] }
+chacha20poly1305 = "0.10"
+rand = "0.8"
+sha2 = "0.10"
+hmac = "0.12"
+hex = "0.4"
+base64 = "0.22"
+md-5 = "0.10"
+urlencoding = "2"
+directories = "6"
+fs2 = "0.4"
+interprocess = { version = "2.2", features = ["tokio"] }
+regex = "1"
+csv = "1"
+zeroize = { version = "1", features = ["derive"] }
+zip = { version = "4", default-features = false, features = ["deflate"] }
+flate2 = "1"
+tar = "0.4"
+sysinfo = "0.37"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3.6", features = ["apple-native"] }
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+keyring = { version = "3.6", features = ["windows-native"] }
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3.6", features = ["sync-secret-service", "crypto-rust"] }
+
+[dev-dependencies]
+tempfile = "3"
+axum = "0.8"
+

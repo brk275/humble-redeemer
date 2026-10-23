@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/hrctl", "crates/gui"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.88"
+repository = "https://github.com/brk275/humble-redeemer"
+
+[workspace.dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "cookies", "gzip"] }
+
+[profile.release]
+lto = "thin"
+strip = "symbols"
+debug = 0
+

@@ -1,0 +1,968 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+use eframe::egui::{self, Color32, RichText, Vec2};
+use humble_redeemer_core::{ipc, model::*, privacy::safe_text};
+use serde_json::Value;
+use std::{
+    collections::HashSet,
+    sync::mpsc,
+    time::{Duration, Instant},
+};
+use zeroize::Zeroizing;
+
+const ACCENT: Color32 = Color32::from_rgb(82, 218, 185);
+const MUTED: Color32 = Color32::from_rgb(155, 170, 191);
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Page {
+    Overview,
+    Library,
+    Choice,
+    Review,
+    Queue,
+    Results,
+    Settings,
+}
+impl Page {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Overview => "Overview",
+            Self::Library => "Library",
+            Self::Choice => "Humble Choice",
+            Self::Review => "Review batch",
+            Self::Queue => "Active queue",
+            Self::Results => "Results",
+            Self::Settings => "Settings",
+        }
+    }
+}
+struct App {
+    demo: bool,
+    page: Page,
+    snapshot: Option<Snapshot>,
+    selected: HashSet<String>,
+    choice_selected: HashSet<String>,
+    search: String,
+    only_eligible: bool,
+    allow_reveal: bool,
+    review: Option<Batch>,
+    rx: Option<mpsc::Receiver<Result<Value, String>>>,
+    last_poll: Instant,
+    error: String,
+    busy: String,
+    browser: Option<BrowserKind>,
+    show_key: Option<(String, Zeroizing<String>, Instant)>,
+    export_keys: bool,
+    smoke: bool,
+    frames: usize,
+    quit_after_response: bool,
+}
+impl App {
+    fn new(demo: bool, smoke: bool) -> Self {
+        Self {
+            demo,
+            page: Page::Overview,
+            snapshot: None,
+            selected: HashSet::new(),
+            choice_selected: HashSet::new(),
+            search: String::new(),
+            only_eligible: false,
+            allow_reveal: false,
+            review: None,
+            rx: None,
+            last_poll: Instant::now() - Duration::from_secs(10),
+            error: String::new(),
+            busy: String::new(),
+            browser: None,
+            show_key: None,
+            export_keys: false,
+            smoke,
+            frames: 0,
+            quit_after_response: false,
+        }
+    }
+    fn dispatch(&mut self, command: Command, label: &str) {
+        if self.rx.is_some() {
+            return;
+        }
+        self.error.clear();
+        self.busy = label.into();
+        let (tx, rx) = mpsc::channel();
+        let demo = self.demo;
+        std::thread::spawn(move || {
+            let result =
+                ipc::blocking_request(demo, command).map_err(|e| safe_text(&e.to_string()));
+            let _ = tx.send(result);
+        });
+        self.rx = Some(rx);
+    }
+    fn approve_start(&mut self, batch: Batch) {
+        if self.rx.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        let demo = self.demo;
+        self.busy = "Starting approved batch…".into();
+        std::thread::spawn(move || {
+            let result = (|| {
+                ipc::blocking_request(
+                    demo,
+                    Command::Approve {
+                        batch_id: batch.id.clone(),
+                        digest: batch.digest,
+                    },
+                )?;
+                ipc::blocking_request(demo, Command::Start { batch_id: batch.id })
+            })()
+            .map_err(|e: anyhow::Error| safe_text(&e.to_string()));
+            let _ = tx.send(result);
+        });
+        self.rx = Some(rx);
+    }
+    fn receive(&mut self) {
+        let result = self.rx.as_ref().and_then(|rx| rx.try_recv().ok());
+        if let Some(result) = result {
+            self.rx = None;
+            self.busy.clear();
+            self.last_poll = Instant::now();
+            match result {
+                Ok(value) if value.get("digest").is_some() => {
+                    match serde_json::from_value::<Batch>(value) {
+                        Ok(batch) => {
+                            self.review = Some(batch);
+                            self.page = Page::Review;
+                        }
+                        Err(_) => self.error = "Invalid batch response".into(),
+                    }
+                }
+                Ok(value) if value.get("key").is_some() => {
+                    if let Some(key) = value["key"].as_str() {
+                        self.show_key = Some((
+                            "Private product key".into(),
+                            Zeroizing::new(key.into()),
+                            Instant::now(),
+                        ));
+                    }
+                }
+                Ok(value) => match serde_json::from_value::<Snapshot>(value) {
+                    Ok(snapshot) => {
+                        if let Some(review) = &mut self.review
+                            && let Some(current) =
+                                snapshot.batches.iter().find(|b| b.id == review.id)
+                        {
+                            *review = current.clone();
+                        }
+                        self.snapshot = Some(snapshot);
+                    }
+                    Err(_) => self.error = "Invalid worker response".into(),
+                },
+                Err(error) => self.error = error,
+            }
+        }
+    }
+    fn refresh(&mut self) {
+        self.dispatch(Command::Snapshot, "Refreshing…")
+    }
+    fn plan(&mut self) {
+        self.dispatch(
+            Command::Plan {
+                game_ids: self.selected.iter().cloned().collect(),
+                choice_ids: self.choice_selected.iter().cloned().collect(),
+                allow_reveal: self.allow_reveal,
+            },
+            "Preparing batch review…",
+        )
+    }
+    fn render(&mut self, ctx: &egui::Context) {
+        egui::TopBottomPanel::top("header")
+            .frame(
+                egui::Frame::new()
+                    .fill(Color32::from_rgb(22, 28, 38))
+                    .inner_margin(18.),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("HR").size(24.).strong().color(ACCENT));
+                    ui.add_space(12.);
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new("Humble Redeemer").size(21.).strong());
+                        ui.label(
+                            RichText::new("Your keys. Your computer. Your control.")
+                                .small()
+                                .color(MUTED),
+                        );
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(if self.demo {
+                                "DEMO · synthetic data"
+                            } else {
+                                "LOCAL · private by design"
+                            })
+                            .color(ACCENT),
+                        );
+                    });
+                });
+            });
+        egui::SidePanel::left("navigation")
+            .exact_width(190.)
+            .frame(
+                egui::Frame::new()
+                    .fill(Color32::from_rgb(20, 25, 34))
+                    .inner_margin(18.),
+            )
+            .show(ctx, |ui| {
+                ui.add_space(15.);
+                ui.label(RichText::new("WORKSPACE").small().color(MUTED));
+                ui.add_space(12.);
+                for page in [
+                    Page::Overview,
+                    Page::Library,
+                    Page::Choice,
+                    Page::Review,
+                    Page::Queue,
+                    Page::Results,
+                    Page::Settings,
+                ] {
+                    if ui
+                        .add_sized(
+                            [150., 35.],
+                            egui::Button::new(page.name()).selected(self.page == page),
+                        )
+                        .clicked()
+                    {
+                        self.page = page;
+                    }
+                }
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+                    ui.label(
+                        RichText::new(format!("v{} · unofficial", env!("CARGO_PKG_VERSION")))
+                            .small()
+                            .color(MUTED),
+                    );
+                    ui.label(RichText::new("No telemetry").small().color(MUTED));
+                });
+            });
+        egui::TopBottomPanel::bottom("status")
+            .frame(
+                egui::Frame::new()
+                    .fill(Color32::from_rgb(22, 28, 38))
+                    .inner_margin(12.),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if self.rx.is_some() {
+                        ui.spinner();
+                        ui.label(&self.busy);
+                    } else if let Some(snapshot) = &self.snapshot {
+                        ui.label(RichText::new(&snapshot.message).small().color(MUTED));
+                    } else {
+                        ui.label("Starting private worker…");
+                    }
+                });
+            });
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(Color32::from_rgb(14, 19, 27))
+                    .inner_margin(28.),
+            )
+            .show(ctx, |ui| {
+                if !self.error.is_empty() {
+                    egui::Frame::new()
+                        .fill(Color32::from_rgb(66, 31, 38))
+                        .corner_radius(8.)
+                        .inner_margin(12.)
+                        .show(ui, |ui| {
+                            ui.label(
+                                RichText::new(&self.error).color(Color32::from_rgb(255, 185, 185)),
+                            );
+                        });
+                    ui.add_space(12.);
+                }
+                ui.heading(RichText::new(self.page.name()).size(29.));
+                ui.add_space(8.);
+                match self.page {
+                    Page::Overview => self.overview(ui),
+                    Page::Library => self.library(ui, false),
+                    Page::Results => self.library(ui, true),
+                    Page::Choice => self.choices(ui),
+                    Page::Review => self.review(ui),
+                    Page::Queue => self.queue(ui),
+                    Page::Settings => self.settings(ui),
+                }
+            });
+        if self
+            .show_key
+            .as_ref()
+            .is_some_and(|(_, _, time)| time.elapsed() > Duration::from_secs(20))
+        {
+            self.show_key = None;
+        }
+        if let Some((title, key, _)) = &self.show_key {
+            let title = title.clone();
+            let key = key.to_string();
+            let mut close = false;
+            egui::Window::new(title).collapsible(false).resizable(false).show(ctx, |ui| {
+                ui.label("Visible only because you explicitly requested it. Hidden again after 20 seconds.");
+                ui.add_space(12.);
+                ui.monospace(&key);
+                ui.horizontal(|ui| {
+                    if ui.button("Copy to local clipboard").clicked() { ui.ctx().copy_text(key.clone()); }
+                    if ui.button("Hide now").clicked() { close=true; }
+                });
+            });
+            if close {
+                self.show_key = None;
+            }
+        }
+    }
+    fn overview(&mut self, ui: &mut egui::Ui) {
+        ui.label(
+            RichText::new("Connect once. Review a batch. Let the queue handle the rest.")
+                .color(MUTED),
+        );
+        ui.add_space(22.);
+        if let Some(snapshot) = &self.snapshot {
+            let total = snapshot.games.len();
+            let ready = snapshot
+                .games
+                .iter()
+                .filter(|g| g.outcome.eligible())
+                .count();
+            let redeemed = snapshot
+                .games
+                .iter()
+                .filter(|g| g.outcome == Outcome::Redeemed)
+                .count();
+            let attention = snapshot
+                .games
+                .iter()
+                .filter(|g| {
+                    matches!(
+                        g.outcome,
+                        Outcome::UnknownOutcome
+                            | Outcome::Expired
+                            | Outcome::Exhausted
+                            | Outcome::UsedElsewhere
+                            | Outcome::PermanentFailure
+                    )
+                })
+                .count();
+            ui.columns(4, |columns| {
+                for (column, (label, count)) in columns.iter_mut().zip([
+                    ("Library items", total),
+                    ("Ready to review", ready),
+                    ("Redeemed", redeemed),
+                    ("Need attention", attention),
+                ]) {
+                    card(column, |ui| {
+                        ui.label(
+                            RichText::new(count.to_string())
+                                .size(34.)
+                                .strong()
+                                .color(ACCENT),
+                        );
+                        ui.label(RichText::new(label).color(MUTED));
+                    });
+                }
+            });
+        }
+        ui.add_space(24.);
+        ui.label(RichText::new("ACCOUNT CONNECTIONS").small().color(MUTED));
+        ui.add_space(10.);
+        for provider in [Provider::Humble, Provider::Steam] {
+            let connection = self
+                .snapshot
+                .as_ref()
+                .map(|s| {
+                    if provider == Provider::Humble {
+                        s.humble.clone()
+                    } else {
+                        s.steam.clone()
+                    }
+                })
+                .unwrap_or_default();
+            card(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(
+                            RichText::new(if provider == Provider::Humble {
+                                "Humble Bundle"
+                            } else {
+                                "Steam"
+                            })
+                            .size(18.)
+                            .strong(),
+                        );
+                        ui.label(
+                            RichText::new(if connection.message.is_empty() {
+                                "Sign in directly on the official website."
+                            } else {
+                                &connection.message
+                            })
+                            .color(MUTED),
+                        );
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if connection.connected {
+                            ui.label(RichText::new("Connected").color(ACCENT));
+                        } else if ui
+                            .add_enabled(
+                                self.rx.is_none(),
+                                egui::Button::new(if connection.signing_in {
+                                    "Reconnect"
+                                } else {
+                                    "Connect account"
+                                }),
+                            )
+                            .clicked()
+                        {
+                            self.dispatch(
+                                Command::Connect {
+                                    provider,
+                                    browser: self.browser,
+                                },
+                                "Opening official sign-in page…",
+                            );
+                        }
+                    });
+                });
+            });
+            ui.add_space(10.);
+        }
+        ui.add_space(16.);
+        ui.horizontal(|ui| {
+            if primary(ui, "Synchronize library", self.rx.is_none()) {
+                self.dispatch(Command::Sync, "Synchronizing your library…");
+            }
+            if ui.button("Choose games to redeem").clicked() {
+                self.page = Page::Library;
+            }
+        });
+        ui.add_space(24.);
+        card(ui, |ui| {
+            ui.label(RichText::new("Every outcome has a reason.").strong());
+            ui.label(RichText::new("Owned, previously activated, expired and temporarily exhausted keys are recorded separately. Uncertain requests pause for review instead of being blindly retried.").color(MUTED));
+        });
+    }
+    fn library(&mut self, ui: &mut egui::Ui, results: bool) {
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.search)
+                    .hint_text("Search titles or source…")
+                    .id(egui::Id::new("library-search"))
+                    .desired_width(300.),
+            );
+            ui.checkbox(&mut self.only_eligible, "Eligible only");
+            if results && ui.button("Export redacted report").clicked() {
+                self.export_dialog(false);
+            }
+        });
+        ui.add_space(12.);
+        let query = self.search.to_lowercase();
+        let games = self
+            .snapshot
+            .as_ref()
+            .map(|s| {
+                s.games
+                    .iter()
+                    .filter(|g| {
+                        (!self.only_eligible || g.outcome.eligible())
+                            && (g.title.to_lowercase().contains(&query)
+                                || g.source.to_lowercase().contains(&query))
+                            && (!results
+                                || !matches!(g.outcome, Outcome::Ready | Outcome::Unrevealed))
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if !results {
+            ui.horizontal(|ui| {
+                if ui.button("Select all eligible shown").clicked() {
+                    for game in &games {
+                        if game.outcome.eligible() {
+                            self.selected.insert(game.id.clone());
+                        }
+                    }
+                }
+                if ui.button("Clear selection").clicked() {
+                    self.selected.clear();
+                }
+                ui.label(RichText::new(format!("{} selected", self.selected.len())).color(ACCENT));
+                if primary(
+                    ui,
+                    "Review selected",
+                    !self.selected.is_empty() && self.rx.is_none(),
+                ) {
+                    self.plan();
+                }
+            });
+            ui.checkbox(
+                &mut self.allow_reveal,
+                "Allow this batch to reveal unrevealed keys (removes gift-link availability)",
+            );
+        }
+        ui.separator();
+        if games.is_empty() {
+            ui.add_space(30.);
+            ui.label(RichText::new("No matching items yet. Connect your accounts and synchronize, or import local history in Settings.").color(MUTED));
+            return;
+        }
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show_rows(ui, 58., games.len(), |ui, range| {
+                for index in range {
+                    let game = &games[index];
+                    ui.push_id(&game.id, |ui| {
+                        ui.horizontal(|ui| {
+                            if !results {
+                                let mut checked = self.selected.contains(&game.id);
+                                if ui
+                                    .add_enabled(
+                                        game.outcome.eligible(),
+                                        egui::Checkbox::without_text(&mut checked),
+                                    )
+                                    .on_hover_text(format!("Select {}", game.title))
+                                    .changed()
+                                {
+                                    if checked {
+                                        self.selected.insert(game.id.clone());
+                                    } else {
+                                        self.selected.remove(&game.id);
+                                    }
+                                }
+                            }
+                            ui.allocate_ui_with_layout(
+                                Vec2::new((ui.available_width() - 290.).max(240.), 50.),
+                                egui::Layout::top_down(egui::Align::LEFT),
+                                |ui| {
+                                    ui.label(RichText::new(&game.title).strong());
+                                    ui.label(RichText::new(&game.source).small().color(MUTED))
+                                        .on_hover_text(&game.reason);
+                                },
+                            );
+                            ui.label(
+                                RichText::new(game.outcome.label())
+                                    .color(outcome_color(game.outcome)),
+                            )
+                            .on_hover_text(&game.reason);
+                            if game.has_key
+                                && ui
+                                    .small_button("Show key")
+                                    .on_hover_text("Reveal this stored key locally for 20 seconds")
+                                    .clicked()
+                            {
+                                self.dispatch(
+                                    Command::RevealKey {
+                                        game_id: game.id.clone(),
+                                    },
+                                    "Unlocking key locally…",
+                                );
+                            }
+                        });
+                        ui.separator();
+                    });
+                }
+            });
+    }
+    fn choices(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("Select eligible Steam games from your existing Choice entitlements. Monthly limits apply; purchases and promotional memberships are excluded.").color(MUTED));
+        ui.add_space(14.);
+        let choices = self
+            .snapshot
+            .as_ref()
+            .map(|s| s.choices.clone())
+            .unwrap_or_default();
+        if choices.is_empty() {
+            ui.label("No unclaimed eligible Choice items were found. Synchronize to check again.");
+            return;
+        }
+        ui.horizontal(|ui| {
+            ui.checkbox(
+                &mut self.allow_reveal,
+                "Allow selected claims and key reveals",
+            );
+            if primary(
+                ui,
+                "Review Choice selections",
+                !self.choice_selected.is_empty() && self.rx.is_none(),
+            ) {
+                self.plan();
+            }
+        });
+        ui.add_space(12.);
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for choice in choices {
+                card(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        let mut checked = self.choice_selected.contains(&choice.id);
+                        if ui
+                            .add_enabled(
+                                choice.available,
+                                egui::Checkbox::new(&mut checked, &choice.title),
+                            )
+                            .changed()
+                        {
+                            if checked {
+                                self.choice_selected.insert(choice.id.clone());
+                            } else {
+                                self.choice_selected.remove(&choice.id);
+                            }
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(
+                                RichText::new(format!(
+                                    "{} · {} selections left",
+                                    choice.month, choice.remaining
+                                ))
+                                .small()
+                                .color(MUTED),
+                            );
+                        });
+                    });
+                });
+                ui.add_space(8.);
+            }
+        });
+    }
+    fn review(&mut self, ui: &mut egui::Ui) {
+        let Some(batch) = self.review.clone() else {
+            ui.label("Select games in Library or Humble Choice, then prepare a batch for review.");
+            return;
+        };
+        ui.label(RichText::new("This approval covers only these selected items and the currently connected accounts.").color(MUTED));
+        ui.add_space(16.);
+        card(ui, |ui| {
+            ui.label(
+                RichText::new(format!(
+                    "{} library items · {} Choice selections",
+                    batch.game_ids.len(),
+                    batch.choice_ids.len()
+                ))
+                .size(22.)
+                .strong(),
+            );
+            ui.label(if batch.allow_reveal {
+                "Key reveals and selected Choice claims are permitted for this batch."
+            } else {
+                "This batch uses revealed keys only."
+            });
+            ui.label(RichText::new("Revealing a key removes its gift-link option. Activations cannot be undone by this app.").color(Color32::from_rgb(242,193,114)));
+        });
+        ui.add_space(15.);
+        let snapshot = self.snapshot.clone();
+        egui::ScrollArea::vertical()
+            .max_height(330.)
+            .show(ui, |ui| {
+                if let Some(snapshot) = &snapshot {
+                    for id in &batch.game_ids {
+                        if let Some(game) = snapshot.games.iter().find(|g| &g.id == id) {
+                            ui.label(format!("• {}", game.title));
+                        }
+                    }
+                    for id in &batch.choice_ids {
+                        if let Some(choice) = snapshot.choices.iter().find(|c| &c.id == id) {
+                            ui.label(format!("• {} — {}", choice.title, choice.month));
+                        }
+                    }
+                }
+            });
+        ui.add_space(20.);
+        ui.monospace(format!("Batch {}", batch.id));
+        ui.label(RichText::new(format!("State: {}", batch.state)).color(MUTED));
+        ui.add_space(12.);
+        if ["review", "approved", "paused"].contains(&batch.state.as_str())
+            && primary(ui, "Approve this batch and start", self.rx.is_none())
+        {
+            self.approve_start(batch);
+            self.page = Page::Queue;
+        }
+    }
+    fn queue(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("Approved work continues when this window closes. Use Pause or Quit and pause to stop it safely.").color(MUTED));
+        ui.add_space(16.);
+        let batches = self
+            .snapshot
+            .as_ref()
+            .map(|s| s.batches.clone())
+            .unwrap_or_default();
+        if batches.is_empty() {
+            ui.label("No batches yet. Select titles in your library and review a batch.");
+        }
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for batch in batches.iter().rev() {
+                card(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(format!("Batch {}", &batch.id[..8.min(batch.id.len())]))
+                                .size(18.)
+                                .strong(),
+                        );
+                        ui.label(RichText::new(&batch.state).color(ACCENT));
+                    });
+                    ui.add(
+                        egui::ProgressBar::new(if batch.game_ids.is_empty() {
+                            0.
+                        } else {
+                            batch.cursor as f32 / batch.game_ids.len() as f32
+                        })
+                        .text(format!(
+                            "{} / {} keys processed · {} / {} Choice claims",
+                            batch.cursor,
+                            batch.game_ids.len(),
+                            batch.choice_cursor,
+                            batch.choice_ids.len()
+                        )),
+                    );
+                    if let Some(deadline) = batch.next_retry_at {
+                        ui.label(format!(
+                            "Cooldown remaining: {} minutes",
+                            ((deadline - now()).max(0) + 59) / 60
+                        ));
+                    }
+                    ui.label(RichText::new(&batch.message).small().color(MUTED));
+                    ui.horizontal(|ui| {
+                        if ["running", "cooldown"].contains(&batch.state.as_str())
+                            && ui.button("Pause").clicked()
+                        {
+                            self.dispatch(
+                                Command::Pause {
+                                    batch_id: batch.id.clone(),
+                                },
+                                "Pausing…",
+                            );
+                        }
+                        if batch.state == "paused" && ui.button("Resume approved batch").clicked() {
+                            self.dispatch(
+                                Command::Resume {
+                                    batch_id: batch.id.clone(),
+                                },
+                                "Resuming…",
+                            );
+                        }
+                        if !["complete", "cancelled"].contains(&batch.state.as_str())
+                            && ui.button("Cancel remaining items").clicked()
+                        {
+                            self.dispatch(
+                                Command::Cancel {
+                                    batch_id: batch.id.clone(),
+                                },
+                                "Cancelling…",
+                            );
+                        }
+                    });
+                });
+                ui.add_space(12.);
+            }
+        });
+    }
+    fn settings(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("PRIVATE STORAGE").small().color(MUTED));
+        ui.add_space(10.);
+        card(ui, |ui| {
+            let persistent = self.snapshot.as_ref().is_some_and(|s| s.persistent_vault);
+            ui.label(RichText::new(if self.demo{"Demo storage is separate from your real accounts."}else if persistent{"System keyring available. Sessions and keys are encrypted at rest."}else{"Session-only vault. Unlock your system keyring before reconnecting for persistent storage."}).strong());
+            ui.label(RichText::new("No telemetry. Account passwords stay on official websites. Product keys and cookies never appear in assistant tool responses.").color(MUTED));
+        });
+        ui.add_space(20.);
+        ui.label(RichText::new("BROWSER SIGN-IN").small().color(MUTED));
+        egui::ComboBox::from_label("Browser")
+            .selected_text(self.browser.map(|b| b.name()).unwrap_or("Automatic"))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.browser, None, "Automatic");
+                ui.selectable_value(&mut self.browser, Some(BrowserKind::Firefox), "Firefox");
+                ui.selectable_value(&mut self.browser, Some(BrowserKind::Chrome), "Chrome");
+            });
+        ui.horizontal(|ui| {
+            for browser in [BrowserKind::Firefox, BrowserKind::Chrome] {
+                if ui
+                    .button(format!("Provision {} driver", browser.name()))
+                    .clicked()
+                {
+                    self.dispatch(
+                        Command::InstallDriver { browser },
+                        "Downloading and verifying the official driver…",
+                    );
+                }
+            }
+        });
+        ui.add_space(20.);
+        ui.label(
+            RichText::new("LOCAL HISTORY AND REPORTS")
+                .small()
+                .color(MUTED),
+        );
+        if ui.button("Import legacy CSV history…").clicked()
+            && let Some(path) = rfd::FileDialog::new()
+                .add_filter("CSV history", &["csv"])
+                .pick_file()
+        {
+            self.dispatch(
+                Command::Import {
+                    path: path.to_string_lossy().into(),
+                },
+                "Importing history locally…",
+            );
+        }
+        ui.label(RichText::new("Original CSV files are preserved. Ambiguous old results retain their original uncertainty.").small().color(MUTED));
+        ui.checkbox(
+            &mut self.export_keys,
+            "Include plaintext product keys in the next local export",
+        );
+        if self.export_keys {
+            ui.colored_label(
+                Color32::from_rgb(242, 193, 114),
+                "This file will contain secrets. Keep it private and out of GitHub.",
+            );
+        }
+        if ui.button("Save CSV report…").clicked() {
+            self.export_dialog(self.export_keys);
+            self.export_keys = false;
+        }
+        ui.add_space(20.);
+        ui.label(RichText::new("ASSISTANT CONNECTION").small().color(MUTED));
+        ui.label("The bundled hrctl mcp command exposes local, structured controls over stdio. Approve one concrete batch at a time.");
+        ui.horizontal(|ui| {
+            for provider in [Provider::Humble, Provider::Steam] {
+                if ui
+                    .button(format!("Forget {} session", provider.name()))
+                    .clicked()
+                {
+                    self.dispatch(
+                        Command::Disconnect { provider },
+                        "Forgetting local session…",
+                    );
+                }
+            }
+        });
+        ui.add_space(20.);
+        if ui.button("Quit worker and pause approved work").clicked() {
+            self.quit_after_response = true;
+            self.dispatch(Command::Shutdown { pause: true }, "Stopping worker…");
+        }
+    }
+    fn export_dialog(&mut self, include_keys: bool) {
+        if let Some(path) = rfd::FileDialog::new()
+            .set_file_name(if include_keys {
+                "private-key-export.csv"
+            } else {
+                "redemption-report.csv"
+            })
+            .add_filter("CSV report", &["csv"])
+            .save_file()
+        {
+            self.dispatch(
+                Command::Export {
+                    path: path.to_string_lossy().into(),
+                    include_keys,
+                },
+                "Saving local report…",
+            );
+        }
+    }
+}
+impl eframe::App for App {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.receive();
+        if self.quit_after_response && self.rx.is_none() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+        if self.rx.is_none() && self.last_poll.elapsed() > Duration::from_secs(3) {
+            self.refresh();
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F)) {
+            self.page = Page::Library;
+            ctx.memory_mut(|m| m.request_focus(egui::Id::new("library-search")));
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::R)) {
+            self.dispatch(Command::Sync, "Synchronizing…");
+        }
+        self.render(ctx);
+        ctx.request_repaint_after(Duration::from_millis(150));
+        self.frames += 1;
+        if self.smoke && self.frames > 25 {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+}
+fn card<R>(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    egui::Frame::new()
+        .fill(Color32::from_rgb(25, 32, 43))
+        .corner_radius(10.)
+        .inner_margin(16.)
+        .show(ui, body)
+        .inner
+}
+fn primary(ui: &mut egui::Ui, text: &str, enabled: bool) -> bool {
+    ui.add_enabled(
+        enabled,
+        egui::Button::new(
+            RichText::new(text)
+                .strong()
+                .color(Color32::from_rgb(8, 35, 29)),
+        )
+        .fill(ACCENT)
+        .min_size(Vec2::new(140., 32.)),
+    )
+    .clicked()
+}
+fn outcome_color(outcome: Outcome) -> Color32 {
+    match outcome {
+        Outcome::Redeemed | Outcome::Ready => ACCENT,
+        Outcome::Expired | Outcome::UsedElsewhere | Outcome::PermanentFailure => {
+            Color32::from_rgb(246, 143, 153)
+        }
+        Outcome::UnknownOutcome | Outcome::Exhausted | Outcome::RateLimited => {
+            Color32::from_rgb(242, 193, 114)
+        }
+        _ => MUTED,
+    }
+}
+fn main() -> eframe::Result {
+    let args: Vec<String> = std::env::args().collect();
+    let smoke = args.iter().any(|a| a == "--smoke-test");
+    let demo = smoke || args.iter().any(|a| a == "--demo");
+    eframe::run_native(
+        "Humble Redeemer",
+        eframe::NativeOptions {
+            viewport: egui::ViewportBuilder::default()
+                .with_inner_size([1200., 820.])
+                .with_min_inner_size([900., 650.]),
+            ..Default::default()
+        },
+        Box::new(move |cc| {
+            let mut style = (*cc.egui_ctx.style()).clone();
+            style.visuals = egui::Visuals::dark();
+            style.visuals.selection.bg_fill = Color32::from_rgb(36, 102, 90);
+            style.spacing.item_spacing = Vec2::new(10., 8.);
+            style
+                .text_styles
+                .insert(egui::TextStyle::Body, egui::FontId::proportional(15.));
+            cc.egui_ctx.set_style(style);
+            Ok(Box::new(App::new(demo, smoke)))
+        }),
+    )
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn every_screen_renders_without_network_or_credentials() {
+        let ctx = egui::Context::default();
+        let mut app = App::new(true, false);
+        for page in [
+            Page::Overview,
+            Page::Library,
+            Page::Choice,
+            Page::Review,
+            Page::Queue,
+            Page::Results,
+            Page::Settings,
+        ] {
+            app.page = page;
+            let output = ctx.run(egui::RawInput::default(), |ctx| app.render(ctx));
+            assert!(!output.shapes.is_empty());
+        }
+    }
+}

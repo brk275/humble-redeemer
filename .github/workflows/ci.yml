@@ -1,0 +1,104 @@
+name: Native builds and private-data checks
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            label: macOS-arm64
+          - os: macos-15-intel
+            label: macOS-x64
+          - os: windows-2022
+            label: Windows-x64
+          - os: ubuntu-22.04
+            label: Linux-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Linux native dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libxkbcommon-dev libx11-dev libxrandr-dev libxi-dev libxcursor-dev libgl1-mesa-dev libfontconfig1-dev xvfb
+      - name: Windows installer tools
+        if: runner.os == 'Windows'
+        run: choco install nsis -y --no-progress
+      - name: Privacy audit
+        run: python scripts/audit.py
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Unit and state-machine tests
+        run: cargo test --workspace --locked
+      - name: Build release
+        shell: bash
+        run: |
+          export RUSTFLAGS="--remap-path-prefix=$PWD=workspace --remap-path-prefix=$HOME=build-home"
+          cargo build --workspace --release --locked
+      - name: Worker, CLI and MCP smoke
+        run: python scripts/smoke.py --bin-dir target/release
+      - name: Native GUI launch smoke
+        if: runner.os != 'Linux'
+        shell: bash
+        run: ./target/release/humble-redeemer --smoke-test
+      - name: Linux GUI launch smoke
+        if: runner.os == 'Linux'
+        run: xvfb-run -a ./target/release/humble-redeemer --smoke-test
+      - name: Collect dependency license notices
+        run: python scripts/notices.py
+      - name: Linux AppImage builder
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          curl --fail --location --proto '=https' https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage -o /tmp/appimagetool
+          chmod +x /tmp/appimagetool
+          echo "APPIMAGETOOL=/tmp/appimagetool" >> "$GITHUB_ENV"
+      - name: Package native installers
+        run: python scripts/package.py
+      - name: Inspect uncompressed packages and installer files
+        run: python scripts/audit.py --artifacts dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.label }}
+          path: |
+            dist/*.dmg
+            dist/*.exe
+            dist/*.AppImage
+            dist/*.deb
+            dist/SHA256SUMS-*.txt
+          if-no-files-found: error
+  release:
+    needs: native
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Verify packaged checksums
+        working-directory: artifacts
+        run: for sums in SHA256SUMS-*.txt; do sha256sum --check "$sums"; done
+      - name: Publish prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" artifacts/* --prerelease --title "Humble Redeemer $GITHUB_REF_NAME" --notes-file docs/RELEASE.md --verify-tag
