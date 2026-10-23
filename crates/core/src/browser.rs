@@ -590,7 +590,7 @@ impl Browser {
     }
     pub async fn cookies(&self) -> Result<Vec<Value>> {
         if let Some(native) = &self.native {
-            return native.cookies();
+            return native.service_cookies();
         }
         Ok(self
             .command("GET", "cookie", None)

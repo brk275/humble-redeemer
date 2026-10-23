@@ -48,6 +48,15 @@ impl NativeSession {
     pub fn cookies(&self) -> Result<Vec<Value>> {
         self.jar.snapshot()
     }
+    pub fn service_cookies(&self) -> Result<Vec<Value>> {
+        let path = if self.provider == Provider::Steam {
+            "/account/registerkey"
+        } else {
+            "/"
+        };
+        let target = reqwest::Url::parse(self.provider.origin())?.join(path)?;
+        self.jar.snapshot_for(Some(&target))
+    }
     pub fn store_cookie_present(&self) -> bool {
         reqwest::Url::parse("https://store.steampowered.com/account/registerkey")
             .ok()
@@ -120,7 +129,7 @@ impl NativeSession {
             })
             .collect::<Vec<_>>();
         if let Some(prior) = self
-            .cookies()?
+            .service_cookies()?
             .iter()
             .find(|c| c["name"] == "steamLoginSecure")
             .and_then(|c| c["value"].as_str())
@@ -170,7 +179,7 @@ impl NativeSession {
                     )
                 })
                 .collect::<Vec<_>>();
-            let cookies = self.cookies()?;
+            let cookies = self.jar.snapshot_for(Some(&url))?;
             let csrf = cookies
                 .iter()
                 .find(|c| c["name"] == "csrf_cookie")
@@ -348,11 +357,14 @@ impl SessionJar {
         })
     }
     fn snapshot(&self) -> Result<Vec<Value>> {
+        self.snapshot_for(None)
+    }
+    fn snapshot_for(&self, target: Option<&reqwest::Url>) -> Result<Vec<Value>> {
         let store = self
             .store
             .lock()
             .map_err(|_| anyhow!("Session unavailable"))?;
-        let mut cookies = store.iter_unexpired().map(|c|json!({
+        let mut cookies = store.iter_unexpired().filter(|c|target.is_none_or(|url|c.matches(url))).map(|c|json!({
             "name":c.name(),"value":c.value(),"domain":String::from(&c.domain),"path":String::from(&c.path),
             "hostOnly":matches!(c.domain,cookie_store::CookieDomain::HostOnly(_)),
             "secure":c.secure().unwrap_or(false),"httpOnly":c.http_only().unwrap_or(false),
@@ -439,6 +451,19 @@ fn retry_delay(value: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn store_csrf_uses_its_own_cookies_while_the_vault_keeps_renewal_material() {
+        let session=NativeSession::new(Provider::Steam,vec![
+            json!({"name":"sessionid","value":"store-fixture","domain":"store.steampowered.com","path":"/"}),
+            json!({"name":"sessionid","value":"login-fixture","domain":"login.steampowered.com","path":"/"}),
+            json!({"name":"steamRefresh_steam","value":"refresh-fixture","domain":"login.steampowered.com","path":"/jwt"}),
+            json!({"name":"other_path","value":"path-fixture","domain":"store.steampowered.com","path":"/other"})
+        ],"synthetic-test".into()).unwrap();
+        let service = session.service_cookies().unwrap();
+        assert_eq!(service.len(), 1);
+        assert_eq!(service[0]["value"], "store-fixture");
+        assert_eq!(session.cookies().unwrap().len(), 4);
+    }
     fn apply_cookie(jar: &SessionJar, url: &str, value: &str) {
         let header = header::HeaderValue::from_str(value).unwrap();
         jar.set_cookies(
