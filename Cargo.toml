@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
 members = ["crates/core", "crates/hrctl", "crates/gui"]
+exclude = ["vendor/glib-0.18.5"]
+
+[patch.crates-io]
+# GTK 3 requires glib 0.18; backport its upstream VariantStrIter safety fix.
+glib = { path = "vendor/glib-0.18.5" }
 
 [workspace.package]
 version = "0.1.0"

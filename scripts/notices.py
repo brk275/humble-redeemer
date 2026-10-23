@@ -11,7 +11,7 @@ output = root / "target/notices"
 output.mkdir(parents=True, exist_ok=True)
 summary = []
 for package in metadata["packages"]:
-    if not package.get("source"):
+    if package["id"] in metadata["workspace_members"]:
         continue
     summary.append({key: package.get(key) for key in ("name", "version", "license", "repository")})
     folder = Path(package["manifest_path"]).parent

@@ -1155,6 +1155,16 @@ fn main() -> eframe::Result {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn glib_string_iterator_backport() {
+        use gtk::glib::variant::ToVariant;
+        let value = vec!["first", "middle", "last"].to_variant();
+        let mut iter = value.array_iter_str().unwrap();
+        assert_eq!(iter.next(), Some("first"));
+        assert_eq!(iter.next_back(), Some("last"));
+        assert_eq!(iter.last(), Some("middle"));
+    }
     #[test]
     fn every_screen_renders_without_network_or_credentials() {
         let ctx = egui::Context::default();

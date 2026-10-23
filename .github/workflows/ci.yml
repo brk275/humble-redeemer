@@ -63,6 +63,9 @@ jobs:
       - name: Worker, CLI and MCP smoke
         timeout-minutes: 4
         run: python scripts/smoke.py --bin-dir target/release
+      - name: Optimized GLib backport regression
+        if: runner.os == 'Linux'
+        run: cargo test -p humble-redeemer --release --locked glib_string_iterator_backport
       - name: Native GUI launch smoke
         if: runner.os != 'Linux'
         shell: bash
