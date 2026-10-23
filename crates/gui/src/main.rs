@@ -1,4 +1,5 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+mod login;
 use eframe::egui::{self, Color32, RichText, Vec2};
 use humble_redeemer_core::{ipc, model::*, privacy::safe_text};
 use serde_json::Value;
@@ -53,7 +54,15 @@ struct App {
     export_keys: bool,
     smoke: bool,
     frames: usize,
+    smoke_started: Instant,
     quit_after_response: bool,
+    login: Option<login::Login>,
+    login_requested: Option<Provider>,
+    login_rect: egui::Rect,
+    login_fixture: bool,
+    dismissed_logins: HashSet<Provider>,
+    #[cfg(target_os = "macos")]
+    native_menu: Option<muda::Menu>,
 }
 impl App {
     fn new(demo: bool, smoke: bool) -> Self {
@@ -76,7 +85,15 @@ impl App {
             export_keys: false,
             smoke,
             frames: 0,
+            smoke_started: Instant::now(),
             quit_after_response: false,
+            login: None,
+            login_requested: None,
+            login_rect: egui::Rect::NOTHING,
+            login_fixture: false,
+            dismissed_logins: HashSet::new(),
+            #[cfg(target_os = "macos")]
+            native_menu: None,
         }
     }
     fn dispatch(&mut self, command: Command, label: &str) {
@@ -289,6 +306,10 @@ impl App {
                 }
                 ui.heading(RichText::new(self.page.name()).size(29.));
                 ui.add_space(8.);
+                if self.login.is_some() {
+                    self.login_panel(ui);
+                    return;
+                }
                 match self.page {
                     Page::Overview => self.overview(ui),
                     Page::Library => self.library(ui, false),
@@ -375,6 +396,16 @@ impl App {
                 }
             });
         }
+        if let Some(deadline) = self.snapshot.as_ref().and_then(|s| s.steam_retry_at) {
+            ui.add_space(12.);
+            ui.label(
+                RichText::new(format!(
+                    "Steam cooldown: {} minutes remaining. New batches honor this same deadline.",
+                    ((deadline - now()).max(0) + 59) / 60
+                ))
+                .color(Color32::from_rgb(242, 193, 114)),
+            );
+        }
         ui.add_space(24.);
         ui.label(RichText::new("ACCOUNT CONNECTIONS").small().color(MUTED));
         ui.add_space(10.);
@@ -425,12 +456,14 @@ impl App {
                             )
                             .clicked()
                         {
+                            self.dismissed_logins.remove(&provider);
+                            self.login_requested = Some(provider);
                             self.dispatch(
                                 Command::Connect {
                                     provider,
-                                    browser: self.browser,
+                                    browser: None,
                                 },
-                                "Opening official sign-in page…",
+                                "Opening in-app sign-in…",
                             );
                         }
                     });
@@ -573,6 +606,35 @@ impl App {
                     });
                 }
             });
+    }
+    fn login_panel(&mut self, ui: &mut egui::Ui) {
+        let mut cancel = false;
+        let mut retry = false;
+        if let Some(login) = &self.login {
+            ui.horizontal(|ui| {
+                ui.strong(format!("Sign in to {}", login.provider.name()));
+                if ui.button("Close sign-in").clicked() {
+                    cancel = true;
+                }
+                if ui.button("Verify sign-in again").clicked() {
+                    retry = true;
+                }
+            });
+            ui.label(RichText::new(login.provider.origin()).color(ACCENT));
+            ui.label(&login.message);
+            ui.label("After verification this view closes. Approved work continues without a browser window.");
+            self.login_rect = ui.available_rect_before_wrap();
+        }
+        if retry && let Some(login) = &mut self.login {
+            login.retry();
+        }
+        if cancel {
+            if let Some(login) = &self.login {
+                self.dismissed_logins.insert(login.provider);
+            }
+            self.login = None;
+            self.login_requested = None;
+        }
     }
     fn choices(&mut self, ui: &mut egui::Ui) {
         ui.label(RichText::new("Select eligible Steam games from your existing Choice entitlements. Monthly limits apply; purchases and promotional memberships are excluded.").color(MUTED));
@@ -871,7 +933,11 @@ impl App {
     }
 }
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        #[cfg(target_os = "linux")]
+        while gtk::events_pending() {
+            gtk::main_iteration_do(false);
+        }
         self.receive();
         if self.quit_after_response && self.rx.is_none() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -887,11 +953,56 @@ impl eframe::App for App {
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::R)) {
             self.dispatch(Command::Sync, "Synchronizing…");
         }
+        if self.login.is_none()
+            && let Some(provider) = self.login_requested.take()
+        {
+            match login::Login::new(frame, provider, self.demo, self.login_fixture) {
+                Ok(login) => self.login = Some(login),
+                Err(error) => self.error = safe_text(&error.to_string()),
+            }
+        }
+        if let Some(snapshot) = &self.snapshot {
+            if self.login.is_none() && !self.demo {
+                for (provider, connection) in [
+                    (Provider::Humble, &snapshot.humble),
+                    (Provider::Steam, &snapshot.steam),
+                ] {
+                    if connection.native_login && !self.dismissed_logins.contains(&provider) {
+                        self.login_requested = Some(provider);
+                        break;
+                    }
+                }
+            }
+            if self.login.as_ref().is_some_and(|login| {
+                !login.fixture_mode()
+                    && if login.provider == Provider::Humble {
+                        snapshot.humble.connected
+                    } else {
+                        snapshot.steam.connected
+                    }
+            }) {
+                self.login = None;
+            }
+        }
+        if self.rx.is_none()
+            && let Some(login) = &mut self.login
+            && let Some(command) = login.poll()
+        {
+            self.dispatch(command, "Verifying background session…");
+        }
         self.render(ctx);
+        if let Some(login) = &self.login {
+            login.layout(self.login_rect, !self.login_rect.is_negative());
+        }
         ctx.request_repaint_after(Duration::from_millis(150));
         self.frames += 1;
         if self.smoke && self.frames > 25 {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            if !self.login_fixture || self.login.as_ref().is_some_and(|login| login.fixture_ready) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            } else if self.smoke_started.elapsed() > Duration::from_secs(30) {
+                eprintln!("Synthetic native sign-in view did not become ready");
+                std::process::exit(2);
+            }
         }
     }
 }
@@ -928,16 +1039,57 @@ fn outcome_color(outcome: Outcome) -> Color32 {
         _ => MUTED,
     }
 }
+#[cfg(target_os = "macos")]
+fn install_edit_menu() -> muda::Menu {
+    use muda::{Menu, PredefinedMenuItem, Submenu};
+    let menu = Menu::new();
+    if let Ok(application) =
+        Submenu::with_items("Humble Redeemer", true, &[&PredefinedMenuItem::quit(None)])
+    {
+        let _ = menu.append(&application);
+    }
+    if let Ok(edit) = Submenu::with_items(
+        "Edit",
+        true,
+        &[
+            &PredefinedMenuItem::undo(None),
+            &PredefinedMenuItem::redo(None),
+            &PredefinedMenuItem::separator(),
+            &PredefinedMenuItem::cut(None),
+            &PredefinedMenuItem::copy(None),
+            &PredefinedMenuItem::paste(None),
+            &PredefinedMenuItem::select_all(None),
+        ],
+    ) {
+        let _ = menu.append(&edit);
+    }
+    menu.init_for_nsapp();
+    menu
+}
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().collect();
     let smoke = args.iter().any(|a| a == "--smoke-test");
-    let demo = smoke || args.iter().any(|a| a == "--demo");
+    let login_fixture = args.iter().any(|a| a == "--login-demo");
+    let demo = smoke || login_fixture || args.iter().any(|a| a == "--demo");
+    #[cfg(target_os = "linux")]
+    gtk::gdk::set_allowed_backends("x11");
+    #[cfg(target_os = "linux")]
+    gtk::init().map_err(|error| eframe::Error::AppCreation(Box::new(error)))?;
     eframe::run_native(
-        "Humble Redeemer",
+        if login_fixture {
+            "Humble Redeemer — Demo sign-in"
+        } else {
+            "Humble Redeemer"
+        },
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
                 .with_inner_size([1200., 820.])
                 .with_min_inner_size([900., 650.]),
+            #[cfg(target_os = "linux")]
+            event_loop_builder: Some(Box::new(|builder| {
+                use winit::platform::x11::EventLoopBuilderExtX11;
+                builder.with_x11();
+            })),
             ..Default::default()
         },
         Box::new(move |cc| {
@@ -949,7 +1101,16 @@ fn main() -> eframe::Result {
                 .text_styles
                 .insert(egui::TextStyle::Body, egui::FontId::proportional(15.));
             cc.egui_ctx.set_style(style);
-            Ok(Box::new(App::new(demo, smoke)))
+            let mut app = App::new(demo, smoke);
+            #[cfg(target_os = "macos")]
+            {
+                app.native_menu = Some(install_edit_menu());
+            }
+            if login_fixture {
+                app.login_fixture = true;
+                app.login_requested = Some(Provider::Humble);
+            }
+            Ok(Box::new(app))
         }),
     )
 }

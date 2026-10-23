@@ -163,7 +163,7 @@ impl Redeemer {
         self.call(Command::Sync).await
     }
     #[tool(
-        description = "Open the selected service's official sign-in page. The HUMAN enters credentials and completes security challenges in that browser; never request passwords in chat.",
+        description = "Request the official sign-in panel inside the GUI. The HUMAN enters credentials and completes security challenges there; subsequent work is windowless. Omit browser for native sign-in. Never request passwords in chat.",
         annotations(read_only_hint = false, destructive_hint = false)
     )]
     async fn connect_account(

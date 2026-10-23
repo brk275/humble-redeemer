@@ -148,6 +148,8 @@ pub struct PrivateChoice {
 pub struct Connection {
     pub connected: bool,
     pub signing_in: bool,
+    #[serde(default)]
+    pub native_login: bool,
     pub message: String,
     pub browser: Option<BrowserKind>,
 }
@@ -173,6 +175,8 @@ pub struct Snapshot {
     pub version: String,
     pub demo: bool,
     pub persistent_vault: bool,
+    #[serde(default)]
+    pub steam_retry_at: Option<i64>,
     pub humble: Connection,
     pub steam: Connection,
     pub games: Vec<Game>,
@@ -192,6 +196,12 @@ pub enum Command {
     },
     Disconnect {
         provider: Provider,
+    },
+    // Internal GUI-to-worker operation. Deliberately absent from CLI/MCP tools.
+    AttachNativeSession {
+        provider: Provider,
+        cookies: Vec<Value>,
+        user_agent: String,
     },
     Sync,
     Plan {

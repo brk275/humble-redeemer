@@ -7,29 +7,33 @@ A native Rust desktop app for managing Humble Bundle keys and activating them on
 ## Features
 
 - Native egui/eframe interface: connections, searchable library, Humble Choice, batch review, background queue, results and settings.
-- Human sign-in on the providers' official browser pages, with verified sessions and clean recovery from stale cookies.
+- Official provider sign-in inside a private native WebView; typing/paste stay in the app. Verified sessions run windowless afterward and restore on restart.
 - Encrypted private session and key storage backed by the operating system's credential store; session-only fallback.
 - Exact Steam app ownership checks without the retired `GetAppList` endpoint or a Steam API key.
 - Separate results for owned keys, keys activated elsewhere, expired keys, exhausted stock, activation limits and uncertain outcomes.
-- Persisted, account-bound batches with explicit reveal permission, pause/resume/cancel and conservative activation cooldowns.
+- Persisted, account-bound batches with explicit reveal permission, pause/resume/cancel and shared activation cooldowns that new batches cannot bypass.
 - Local CLI and official Rust SDK stdio MCP tools. Assistant responses never contain passwords, cookies or product keys.
 - Local CSV history migration that preserves ambiguous legacy outcomes and leaves original files unchanged.
+
+![Synthetic embedded sign-in; no real account data](assets/embedded-sign-in-demo.png)
 
 ## Install
 
 Download your platform's installer from [GitHub Releases](https://github.com/brk275/humble-redeemer/releases). Initial packages are **unsigned by a publisher**; macOS bundles have an ad-hoc signature, not Apple notarization. A signature or release download alone is not proof of live account testing. See [verification status](docs/VERIFICATION.md).
 
-Targets: macOS Apple Silicon and Intel, Windows x64, Linux x64 (Ubuntu 22.04 baseline). Linux needs a desktop session, OpenGL, D-Bus, libxkbcommon-x11 and a Secret Service provider for persistent secrets. File dialogs use the desktop portal. Keep `hrctl` beside the GUI executable.
+Targets: macOS Apple Silicon and Intel, Windows x64, Linux x64 (Ubuntu 22.04 baseline). Linux needs an X11/XWayland desktop session, WebKitGTK 4.1, GTK 3, OpenGL, D-Bus, libxkbcommon-x11 and a Secret Service provider for persistent secrets. Windows needs the Microsoft WebView2 Runtime (normally included with Edge). File dialogs use the desktop portal. Keep `hrctl` beside the GUI executable.
 
-Install Firefox or Chrome. The app provisions a matching driver from Mozilla or Google. The browser and driver are external native programs; **Python, Node and Selenium's Python package are not runtime dependencies**.
+The default embedded sign-in needs no separate Chrome/Firefox window or browser driver. An explicit CLI compatibility option (`hrctl connect humble --browser chrome`) retains the verified WebDriver adapter. **Python, Node and Selenium's Python package are not runtime dependencies**.
 
 ## Use
 
-1. Open Humble Redeemer and connect Humble and Steam. Enter credentials only on their own pages and finish security checks there.
+1. Open Humble Redeemer and connect Humble and Steam in the embedded official pages. Enter credentials and finish security checks there. The app closes the view after it independently verifies the background session.
 2. Synchronize the library. Select eligible games or existing Choice entitlements.
 3. Review the exact titles and reveal permission. Revealing keys removes gift-link availability.
 4. Approve the batch once. The worker keeps processing that scope when the window closes.
 5. Review distinct outcomes in Results. Use Settings for local history imports and exports.
+
+Steam activation limits persist across cancellation, new batches and restarts. The worker honors `Retry-After`, including HTTP dates; absent guidance, it waits one hour after an activation-limit response. It never rotates accounts, bypasses the limit or blindly replays an uncertain activation. Expired sessions require manual sign-in again.
 
 The legacy Python tool must finish or be paused before starting a Rust redemption worker. The app detects a running legacy script and refuses concurrent activation.
 

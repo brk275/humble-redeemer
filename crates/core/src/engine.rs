@@ -2,6 +2,7 @@ use crate::{
     browser::{Browser, available_browsers, provision_driver},
     model::*,
     privacy::{csv_safe, safe_text, valid_key},
+    session::SavedSession,
     store::Store,
 };
 use anyhow::{Result, anyhow, bail};
@@ -41,6 +42,32 @@ impl Engine {
         };
         if demo {
             this.seed_demo()?;
+        } else {
+            for provider in [Provider::Humble, Provider::Steam] {
+                let saved = this
+                    .store
+                    .secret::<SavedSession>(&format!("native-session:{}", provider.name()))
+                    .ok()
+                    .flatten()
+                    .or_else(|| {
+                        this.store
+                            .secret::<Vec<Value>>(&format!("session:{}", provider.name()))
+                            .ok()
+                            .flatten()
+                            .map(|cookies| SavedSession {
+                                cookies,
+                                user_agent: "HumbleRedeemer/0.1.0 (unofficial desktop utility)"
+                                    .into(),
+                            })
+                    });
+                if let Some(saved) = saved {
+                    let browser = Browser::from_native(provider, saved.cookies, saved.user_agent)?;
+                    this.browsers.insert(provider, browser);
+                    this.connections.get_mut(&provider).unwrap().signing_in = true;
+                    this.connections.get_mut(&provider).unwrap().message =
+                        "Checking the saved session in the background…".into();
+                }
+            }
         }
         Ok(this)
     }
@@ -102,6 +129,11 @@ impl Engine {
             version: env!("CARGO_PKG_VERSION").into(),
             demo: self.demo,
             persistent_vault: self.store.vault.persistent,
+            steam_retry_at: self
+                .store
+                .get_setting("steam-cooldown-until")?
+                .and_then(|s| s.parse().ok())
+                .filter(|t| *t > now()),
             humble: self.connections[&Provider::Humble].clone(),
             steam: self.connections[&Provider::Steam].clone(),
             games: self.store.games()?,
@@ -110,6 +142,20 @@ impl Engine {
             message: safe_text(&self.message),
             browsers: available_browsers(),
         })
+    }
+    fn pending_cooldown(&self) -> Result<Option<i64>> {
+        let mut deadline = None;
+        for service in ["steam", "humble"] {
+            if let Some(t) = self
+                .store
+                .get_setting(&format!("{service}-cooldown-until"))?
+                .and_then(|s| s.parse::<i64>().ok())
+                .filter(|t| *t > now())
+            {
+                deadline = Some(deadline.unwrap_or(t).max(t));
+            }
+        }
+        Ok(deadline)
     }
     fn binding(&self) -> Result<String> {
         let h = self.store.get_setting("humble")?.unwrap_or_default();
@@ -136,6 +182,13 @@ impl Engine {
                 if self.demo {
                     return Ok(serde_json::to_value(self.snapshot()?)?);
                 }
+                if browser.is_none() {
+                    self.browsers.remove(&provider);
+                    self.connections.insert(provider, Connection { signing_in: true, native_login: true,
+                        message: "Finish sign-in inside Humble Redeemer. No separate Chrome window is required.".into(), ..Default::default() });
+                    self.message = "Open the app's sign-in panel to connect this account.".into();
+                    return Ok(serde_json::to_value(self.snapshot()?)?);
+                }
                 if provider == Provider::Steam {
                     self.owned.clear();
                     self.owned_checked = false;
@@ -152,6 +205,7 @@ impl Engine {
                     Connection {
                         connected: false,
                         signing_in: true,
+                        native_login: false,
                         browser: Some(driver.kind),
                         message: "Complete sign-in in the browser. This app will detect success."
                             .into(),
@@ -161,6 +215,43 @@ impl Engine {
                 self.message =
                     "Sign in directly on the official page; keep that browser window open.".into();
             }
+            Command::AttachNativeSession {
+                provider,
+                cookies,
+                user_agent,
+            } => {
+                let browser = Browser::from_native(provider, cookies, user_agent.clone())?;
+                if !browser.authenticated().await? {
+                    bail!(
+                        "The provider did not verify this background session. Finish sign-in in the app and try again."
+                    );
+                }
+                let cookies = browser.cookies().await?;
+                let binding = self.store.vault.fingerprint(&serde_json::to_vec(&cookies)?);
+                self.store.put_secret(
+                    &format!("native-session:{}", provider.name()),
+                    &SavedSession {
+                        cookies,
+                        user_agent,
+                    },
+                )?;
+                self.store.setting(provider.name(), &binding)?;
+                self.browsers.insert(provider, browser);
+                self.connections.insert(
+                    provider,
+                    Connection {
+                        connected: true,
+                        message: "Verified sign-in. Background work is windowless.".into(),
+                        ..Default::default()
+                    },
+                );
+                if provider == Provider::Steam {
+                    self.owned.clear();
+                    self.owned_checked = false;
+                }
+                self.message =
+                    format!("{} connected. The sign-in view can close.", provider.name());
+            }
             Command::Disconnect { provider } => {
                 if provider == Provider::Steam {
                     self.owned.clear();
@@ -169,6 +260,8 @@ impl Engine {
                 self.browsers.remove(&provider);
                 self.connections.insert(provider, Connection::default());
                 self.store.forget(&format!("session:{}", provider.name()))?;
+                self.store
+                    .forget(&format!("native-session:{}", provider.name()))?;
                 self.store.setting(provider.name(), "")?;
                 for mut batch in self.store.batches()? {
                     if ["running", "cooldown"].contains(&batch.state.as_str()) {
@@ -237,6 +330,10 @@ impl Engine {
                     || !self.connections[&Provider::Steam].connected
                 {
                     bail!("Connect both accounts before running this batch");
+                }
+                if let Some(deadline) = self.pending_cooldown()? {
+                    batch.next_retry_at =
+                        Some(batch.next_retry_at.unwrap_or(deadline).max(deadline));
                 }
                 batch.state = if batch.next_retry_at.is_some_and(|t| t > now()) {
                     "cooldown"
@@ -419,6 +516,29 @@ impl Engine {
         }
         Ok(())
     }
+    fn persist_native_sessions(&mut self) -> Result<()> {
+        for provider in [Provider::Humble, Provider::Steam] {
+            if let Some(saved) = self
+                .browsers
+                .get(&provider)
+                .map(|b| b.native_snapshot())
+                .transpose()?
+                .flatten()
+            {
+                if !self.connections[&provider].connected {
+                    continue;
+                }
+                let digest = self.store.vault.fingerprint(&serde_json::to_vec(&saved)?);
+                let marker = format!("native-snapshot:{}", provider.name());
+                if self.store.get_setting(&marker)?.as_deref() != Some(&digest) {
+                    self.store
+                        .put_secret(&format!("native-session:{}", provider.name()), &saved)?;
+                    self.store.setting(&marker, &digest)?;
+                }
+            }
+        }
+        Ok(())
+    }
     pub async fn tick(&mut self) -> Result<()> {
         if !self.demo {
             for provider in [Provider::Humble, Provider::Steam] {
@@ -439,17 +559,31 @@ impl Engine {
                             let c = self.connections.get_mut(&provider).unwrap();
                             c.connected = true;
                             c.signing_in = false;
+                            c.native_login = false;
                             c.message = "Verified sign-in. Session stays on this computer.".into();
                             self.message = format!("{} is connected.", provider.name());
                         }
-                        Ok(false) => {}
-                        Err(_) => {
-                            self.connections.get_mut(&provider).unwrap().message="Waiting for sign-in. If the browser was closed, reconnect this account.".into();
+                        Ok(false) => {
+                            let connection = self.connections.get_mut(&provider).unwrap();
+                            if connection.browser.is_none() && self.browsers.contains_key(&provider)
+                            {
+                                connection.native_login = true;
+                                connection.message =
+                                    "Saved sign-in expired. Open the app's sign-in panel.".into();
+                            }
+                        }
+                        Err(error) => {
+                            let connection = self.connections.get_mut(&provider).unwrap();
+                            connection.message = safe_text(&error.to_string());
+                            if connection.browser.is_none() {
+                                connection.native_login = true;
+                            }
                         }
                     }
                 }
             }
         }
+        self.persist_native_sessions()?;
         let Some(mut batch) = self
             .store
             .batches()?
@@ -472,6 +606,12 @@ impl Engine {
             batch.message = "Account connections changed. Review a new batch.".into();
             self.store.put_batch(&batch)?;
             return Ok(());
+        }
+        if let Some(deadline) = self.pending_cooldown()? {
+            batch.next_retry_at = Some(batch.next_retry_at.unwrap_or(deadline).max(deadline));
+            batch.state = "cooldown".into();
+            batch.message="A service cooldown is active. This deadline also applies to newly created batches.".into();
+            self.store.put_batch(&batch)?;
         }
         if batch.next_retry_at.is_some_and(|t| t > now()) {
             return Ok(());
@@ -567,6 +707,10 @@ impl Engine {
                 game.outcome = Outcome::RateLimited;
                 batch.state = "cooldown".into();
                 batch.next_retry_at = Some(cooldown_deadline(response.retry_after));
+                self.store.setting(
+                    "humble-cooldown-until",
+                    &batch.next_retry_at.unwrap().to_string(),
+                )?;
                 batch.message =
                     "Humble requested a cooldown. This approved reveal will wait.".into();
             } else if let Some(key) = response.body["key"].as_str().filter(|k| valid_key(k)) {
@@ -667,6 +811,10 @@ impl Engine {
                 if code == 53 {
                     batch.state = "cooldown".into();
                     batch.next_retry_at = Some(cooldown_deadline(response.retry_after));
+                    self.store.setting(
+                        "steam-cooldown-until",
+                        &batch.next_retry_at.unwrap().to_string(),
+                    )?;
                     batch.message="Steam activation limit reached; the approved queue will resume after cooldown.".into();
                 } else {
                     batch.cursor += 1;
@@ -681,6 +829,10 @@ impl Engine {
                 game.outcome = Outcome::RateLimited;
                 batch.state = "cooldown".into();
                 batch.next_retry_at = Some(cooldown_deadline(response.retry_after));
+                self.store.setting(
+                    "steam-cooldown-until",
+                    &batch.next_retry_at.unwrap().to_string(),
+                )?;
             }
             Ok(response) if response.status == 401 || response.status == 403 => {
                 game.outcome = Outcome::LoginRequired;
@@ -1689,5 +1841,50 @@ mod migration_occurrence_tests {
             3
         );
         assert_eq!(std::fs::read(&p).unwrap(), original);
+    }
+}
+
+#[cfg(test)]
+mod cooldown_scope_tests {
+    use super::*;
+    #[tokio::test]
+    async fn a_new_batch_cannot_bypass_a_persisted_service_cooldown() {
+        let d = tempfile::tempdir().unwrap();
+        let mut e = Engine::new(Store::open(d.path().into(), true).unwrap(), true).unwrap();
+        let deadline = now() + 3600;
+        e.store
+            .setting("steam-cooldown-until", &deadline.to_string())
+            .unwrap();
+        let b = e.plan(vec!["demo-0".into()], vec![], false).unwrap();
+        e.handle(Command::Approve {
+            batch_id: b.id.clone(),
+            digest: b.digest,
+        })
+        .await
+        .unwrap();
+        e.handle(Command::Start {
+            batch_id: b.id.clone(),
+        })
+        .await
+        .unwrap();
+        assert_eq!(e.store.batch(&b.id).unwrap().state, "cooldown");
+        e.tick().await.unwrap();
+        assert_eq!(e.store.batch(&b.id).unwrap().cursor, 0);
+        e.handle(Command::Cancel { batch_id: b.id }).await.unwrap();
+        let b = e.plan(vec!["demo-0".into()], vec![], false).unwrap();
+        e.handle(Command::Approve {
+            batch_id: b.id.clone(),
+            digest: b.digest,
+        })
+        .await
+        .unwrap();
+        e.handle(Command::Start {
+            batch_id: b.id.clone(),
+        })
+        .await
+        .unwrap();
+        assert_eq!(e.store.batch(&b.id).unwrap().next_retry_at, Some(deadline));
+        e.store.recover().unwrap();
+        assert_eq!(e.snapshot().unwrap().steam_retry_at, Some(deadline));
     }
 }

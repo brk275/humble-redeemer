@@ -223,9 +223,14 @@ async fn handle_connection(
     }
     let result = match serde_json::from_slice::<Envelope>(&bytes) {
         Ok(envelope) if constant_time_equal(envelope.token.as_bytes(), expected.as_bytes()) => {
-            match engine.lock().await.handle(envelope.command).await {
+            let mut engine = engine.lock().await;
+            match engine.handle(envelope.command).await {
                 Ok(result) => json!({"ok":true,"result":result}),
-                Err(error) => json!({"ok":false,"error":safe_text(&error.to_string())}),
+                Err(error) => {
+                    let message = safe_text(&error.to_string());
+                    engine.message = message.clone();
+                    json!({"ok":false,"error":message})
+                }
             }
         }
         _ => json!({"ok":false,"error":"Local control authentication failed"}),
@@ -247,7 +252,9 @@ fn constant_time_equal(a: &[u8], b: &[u8]) -> bool {
 pub fn blocking_request(demo: bool, command: Command) -> Result<Value> {
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async {
-        ensure_worker(demo).await?;
+        if !matches!(command, Command::Shutdown { .. }) {
+            ensure_worker(demo).await?;
+        }
         request(demo, command).await
     })
 }

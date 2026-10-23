@@ -102,7 +102,9 @@ async fn run(args: Args) -> anyhow::Result<()> {
     if matches!(args.command, Action::Mcp) {
         return mcp::serve(args.demo).await;
     }
-    ipc::ensure_worker(args.demo).await?;
+    if !matches!(args.command, Action::Quit { .. }) {
+        ipc::ensure_worker(args.demo).await?;
+    }
     let command = match args.command {
         Action::Status | Action::Library { .. } | Action::Choices => Command::Snapshot,
         Action::Connect {

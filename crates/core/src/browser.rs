@@ -368,6 +368,7 @@ pub struct Browser {
     pub kind: BrowserKind,
     pub provider: Provider,
     profile: PathBuf,
+    native: Option<crate::session::NativeSession>,
 }
 #[derive(Deserialize)]
 pub struct WebResponse {
@@ -382,6 +383,7 @@ impl Browser {
     #[cfg(test)]
     pub(crate) fn fixture(endpoint: String, provider: Provider) -> Self {
         Self {
+            native: None,
             child: None,
             endpoint,
             session: "fixture".into(),
@@ -390,6 +392,35 @@ impl Browser {
             provider,
             profile: PathBuf::new(),
         }
+    }
+    pub(crate) fn from_native(
+        provider: Provider,
+        cookies: Vec<Value>,
+        user_agent: String,
+    ) -> Result<Self> {
+        Ok(Self {
+            child: None,
+            endpoint: String::new(),
+            session: String::new(),
+            http: http_client()?,
+            kind: BrowserKind::Chrome,
+            provider,
+            profile: PathBuf::new(),
+            native: Some(crate::session::NativeSession::new(
+                provider, cookies, user_agent,
+            )?),
+        })
+    }
+    pub(crate) fn native_snapshot(&self) -> Result<Option<crate::session::SavedSession>> {
+        self.native
+            .as_ref()
+            .map(|native| {
+                Ok(crate::session::SavedSession {
+                    cookies: native.cookies()?,
+                    user_agent: native.user_agent.clone(),
+                })
+            })
+            .transpose()
     }
     pub async fn open(
         root: &Path,
@@ -432,6 +463,7 @@ impl Browser {
         let endpoint = format!("http://127.0.0.1:{port}");
         let http = http_client()?;
         let mut this = Self {
+            native: None,
             child: Some(child),
             endpoint,
             session: String::new(),
@@ -532,6 +564,9 @@ impl Browser {
         Ok(())
     }
     pub async fn cookies(&self) -> Result<Vec<Value>> {
+        if let Some(native) = &self.native {
+            return native.cookies();
+        }
         Ok(self
             .command("GET", "cookie", None)
             .await?
@@ -549,6 +584,9 @@ impl Browser {
         Ok(())
     }
     pub async fn fetch(&self, path: &str, payload: Option<Value>) -> Result<WebResponse> {
+        if let Some(native) = &self.native {
+            return native.fetch(path, payload).await;
+        }
         self.verify_origin().await?;
         if !path.starts_with('/') || path.starts_with("//") {
             bail!("Only service-relative requests are allowed");
@@ -611,6 +649,9 @@ impl Browser {
             })
     }
     pub async fn fetch_many(&self, paths: &[String]) -> Result<Vec<WebResponse>> {
+        if self.native.is_some() {
+            return futures::future::try_join_all(paths.iter().map(|p| self.fetch(p, None))).await;
+        }
         self.verify_origin().await?;
         if paths
             .iter()

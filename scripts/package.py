@@ -31,6 +31,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile", default="release", choices=("release", "debug"))
     parser.add_argument("--skip-installers", action="store_true")
+    parser.add_argument("--demo-app", action="store_true", help="Separate local native-UI verification bundle")
     args = parser.parse_args()
     binary_dir = ROOT / "target" / args.profile
     output = ROOT / "dist"
@@ -39,13 +40,13 @@ def main():
     arch = "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "x64"
     system = platform.system()
     if system == "Darwin":
-        app = output / "Humble Redeemer.app"
+        app = output / ("Humble Redeemer Demo.app" if args.demo_app else "Humble Redeemer.app")
         if app.exists(): shutil.rmtree(app)
         resources = app / "Contents/Resources"
         copy_common(app / "Contents/MacOS", binary_dir, support=resources)
         shutil.copy2(ROOT / "assets/icon.svg", resources)
         with (app / "Contents/Info.plist").open("wb") as info:
-            plistlib.dump({"CFBundleName": "Humble Redeemer", "CFBundleDisplayName": "Humble Redeemer", "CFBundleExecutable": "humble-redeemer", "CFBundleIdentifier": "io.github.brk275.humble-redeemer", "CFBundleVersion": version, "CFBundleShortVersionString": version, "CFBundlePackageType": "APPL", "NSHighResolutionCapable": True, "LSMinimumSystemVersion": "12.0", "NSHumanReadableCopyright": "Copyright 2026 brk275. Unofficial utility."}, info)
+            plistlib.dump({"CFBundleName": "Humble Redeemer Demo" if args.demo_app else "Humble Redeemer", "CFBundleDisplayName": "Humble Redeemer Demo" if args.demo_app else "Humble Redeemer", "CFBundleExecutable": "humble-redeemer", "CFBundleIdentifier": "io.github.brk275.humble-redeemer.demo" if args.demo_app else "io.github.brk275.humble-redeemer", "CFBundleVersion": version, "CFBundleShortVersionString": version, "CFBundlePackageType": "APPL", "NSHighResolutionCapable": True, "LSMinimumSystemVersion": "12.0", "NSHumanReadableCopyright": "Copyright 2026 brk275. Unofficial utility."}, info)
         subprocess.run(["codesign", "--force", "--sign", "-", str(app / "Contents/MacOS/hrctl")], check=True)
         subprocess.run(["codesign", "--force", "--sign", "-", str(app)], check=True)
         subprocess.run(["codesign", "--verify", "--deep", "--strict", str(app)], check=True)
@@ -106,7 +107,7 @@ def main():
             icon_dir.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / "assets/icon.svg", icon_dir / "humble-redeemer.svg")
             (deb / "DEBIAN").mkdir(exist_ok=True)
-            (deb / "DEBIAN/control").write_text(f"Package: humble-redeemer\nVersion: {version}\nArchitecture: amd64\nMaintainer: brk275 <88346297+brk275@users.noreply.github.com>\nDepends: libdbus-1-3, libx11-6, libxkbcommon0, libxkbcommon-x11-0, libgl1, libfontconfig1\nDescription: Private native Rust Humble-to-Steam key manager\n")
+            (deb / "DEBIAN/control").write_text(f"Package: humble-redeemer\nVersion: {version}\nArchitecture: amd64\nMaintainer: brk275 <88346297+brk275@users.noreply.github.com>\nDepends: libwebkit2gtk-4.1-0, libgtk-3-0, libdbus-1-3, libx11-6, libxkbcommon0, libxkbcommon-x11-0, libgl1, libfontconfig1\nDescription: Private native Rust Humble-to-Steam key manager\n")
             subprocess.run(["dpkg-deb", "--root-owner-group", "--build", str(deb), str(output / f"humble-redeemer_{version}_amd64.deb")], check=True)
             shutil.rmtree(deb)
     else:

@@ -17,3 +17,6 @@
 /exports/
 /screenshots/
 
+
+__pycache__/
+*.py[cod]

@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import queue
+import threading
 import time
 
 
@@ -18,7 +20,9 @@ def main():
     with tempfile.TemporaryDirectory(prefix="hr-synthetic-") as data:
         env = {**os.environ, "HUMBLE_REDEEMER_DATA_DIR": data}
         def cli(*arguments):
+            print("Checking CLI " + arguments[0], flush=True)
             return json.loads(subprocess.check_output([str(executable), "--demo", "--json", *arguments], env=env, text=True, timeout=60))
+        mcp = None
         try:
             state = cli("status")
             assert state["demo"] and state["humble"]["connected"]
@@ -37,11 +41,23 @@ def main():
             cli("export", str(report))
             assert "product_key" not in report.read_text()
             mcp = subprocess.Popen([str(executable), "--demo", "mcp"], env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            incoming = queue.Queue()
+            def read_protocol():
+                for line in mcp.stdout:
+                    incoming.put(line)
+                incoming.put(None)
+            threading.Thread(target=read_protocol, daemon=True).start()
             def rpc(message):
+                print("Checking MCP " + message["method"], flush=True)
                 mcp.stdin.write(json.dumps(message) + "\n")
                 mcp.stdin.flush()
                 if "id" in message:
-                    return json.loads(mcp.stdout.readline())
+                    try:
+                        line = incoming.get(timeout=25)
+                    except queue.Empty:
+                        raise RuntimeError("MCP response timed out for " + message["method"])
+                    if line is None: raise RuntimeError("MCP process exited before a response")
+                    return json.loads(line)
             init = rpc({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "synthetic-smoke", "version": "1"}}})
             assert "result" in init
             rpc({"jsonrpc": "2.0", "method": "notifications/initialized"})
@@ -56,6 +72,10 @@ def main():
             mcp.wait(timeout=10)
             print("PASS: native IPC, approval gate, queue completion, redacted export, official SDK MCP handshake/tools/status")
         finally:
+            if mcp is not None and mcp.poll() is None:
+                mcp.terminate()
+                try: mcp.wait(timeout=10)
+                except subprocess.TimeoutExpired: mcp.kill(); mcp.wait(timeout=10)
             subprocess.run([str(executable), "--demo", "quit", "--pause"], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
             time.sleep(0.5)
 
