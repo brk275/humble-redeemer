@@ -27,6 +27,7 @@ interprocess = { version = "2.2", features = ["tokio"] }
 regex = "1"
 csv = "1"
 httpdate = "1"
+cookie_store = "0.22"
 futures = "0.3"
 zeroize = { version = "1", features = ["derive"] }
 zip = { version = "9", default-features = false, features = ["deflate"] }
@@ -48,4 +49,6 @@ keyring = { version = "3.6", features = ["sync-secret-service", "crypto-rust"] }
 [dev-dependencies]
 tempfile = "3"
 axum = "0.8"
+rcgen = "0.14"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 

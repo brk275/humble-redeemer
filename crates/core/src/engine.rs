@@ -22,6 +22,8 @@ pub struct Engine {
     pub shutdown: bool,
     owned: HashSet<u32>,
     owned_checked: bool,
+    steam_identity: Option<String>,
+    auth_retry_at: HashMap<Provider, i64>,
 }
 impl Engine {
     pub fn new(store: Store, demo: bool) -> Result<Self> {
@@ -39,6 +41,8 @@ impl Engine {
             shutdown: false,
             owned: HashSet::new(),
             owned_checked: false,
+            steam_identity: None,
+            auth_retry_at: HashMap::new(),
         };
         if demo {
             this.seed_demo()?;
@@ -56,6 +60,7 @@ impl Engine {
                             .flatten()
                             .map(|cookies| SavedSession {
                                 cookies,
+                                steam_account_id: None,
                                 user_agent: concat!(
                                     "HumbleRedeemer/",
                                     env!("CARGO_PKG_VERSION"),
@@ -65,7 +70,13 @@ impl Engine {
                             })
                     });
                 if let Some(saved) = saved {
-                    let browser = Browser::from_native(provider, saved.cookies, saved.user_agent)?;
+                    if provider == Provider::Steam {
+                        this.steam_identity = saved
+                            .steam_account_id
+                            .clone()
+                            .or_else(|| crate::browser::steam_account_id(&saved.cookies));
+                    }
+                    let browser = Browser::from_saved(provider, saved)?;
                     this.browsers.insert(provider, browser);
                     this.connections.get_mut(&provider).unwrap().signing_in = true;
                     this.connections.get_mut(&provider).unwrap().message =
@@ -130,6 +141,14 @@ impl Engine {
         Ok(())
     }
     pub fn snapshot(&self) -> Result<Snapshot> {
+        let mut steam = self.connections[&Provider::Steam].clone();
+        steam.session_renewal_available = self
+            .browsers
+            .get(&Provider::Steam)
+            .map(|b| b.native_snapshot())
+            .transpose()?
+            .flatten()
+            .is_some_and(|s| s.cookies.iter().any(|c| c["name"] == "steamRefresh_steam"));
         Ok(Snapshot {
             version: env!("CARGO_PKG_VERSION").into(),
             demo: self.demo,
@@ -140,7 +159,7 @@ impl Engine {
                 .and_then(|s| s.parse().ok())
                 .filter(|t| *t > now()),
             humble: self.connections[&Provider::Humble].clone(),
-            steam: self.connections[&Provider::Steam].clone(),
+            steam,
             games: self.store.games()?,
             choices: self.store.choices()?,
             batches: self.store.batches()?,
@@ -190,6 +209,19 @@ impl Engine {
         self.store.setting(provider.name(), binding)
     }
     fn session_binding(&self, provider: Provider, cookies: &[Value]) -> String {
+        if provider == Provider::Steam
+            && let Some(identity) = crate::browser::steam_account_id(cookies)
+        {
+            // Preserve an existing approval across cookie rotation for the same
+            // verified account, including sessions saved by earlier versions.
+            if self.steam_identity.as_ref() == Some(&identity)
+                && let Ok(Some(binding)) = self.store.get_setting("steam")
+                && !binding.is_empty()
+            {
+                return binding;
+            }
+            return self.id("steam-account", &identity);
+        }
         let mut identities: Vec<_> = cookies
             .iter()
             .map(|cookie| {
@@ -252,6 +284,7 @@ impl Engine {
                         connected: false,
                         signing_in: true,
                         native_login: false,
+                        session_renewal_available: false,
                         browser: Some(driver.kind),
                         message: "Complete sign-in in the browser. This app will detect success."
                             .into(),
@@ -267,21 +300,26 @@ impl Engine {
                 user_agent,
             } => {
                 let browser = Browser::from_native(provider, cookies, user_agent.clone())?;
-                if !browser.authenticated().await? {
+                let (authenticated, diagnostic) = browser.authentication_report().await?;
+                if !authenticated {
                     bail!(
-                        "The provider did not verify this background session. Finish sign-in in the app and try again."
+                        "The provider did not verify this background session ({diagnostic}). Keep the sign-in page open and verify again."
                     );
                 }
                 let cookies = browser.cookies().await?;
                 let binding = self.session_binding(provider, &cookies);
                 self.store.put_secret(
                     &format!("native-session:{}", provider.name()),
-                    &SavedSession {
-                        cookies,
-                        user_agent,
-                    },
+                    &browser
+                        .native_snapshot()?
+                        .ok_or_else(|| anyhow!("Native session unavailable"))?,
                 )?;
                 self.bind_session(provider, &binding)?;
+                if provider == Provider::Steam {
+                    self.steam_identity =
+                        crate::browser::steam_account_id(&browser.cookies().await?);
+                }
+                self.auth_retry_at.remove(&provider);
                 self.browsers.insert(provider, browser);
                 self.connections.insert(
                     provider,
@@ -299,7 +337,9 @@ impl Engine {
                     format!("{} connected. The sign-in view can close.", provider.name());
             }
             Command::Disconnect { provider } => {
+                self.auth_retry_at.remove(&provider);
                 if provider == Provider::Steam {
+                    self.steam_identity = None;
                     self.owned.clear();
                     self.owned_checked = false;
                 }
@@ -571,9 +611,9 @@ impl Engine {
                 .transpose()?
                 .flatten()
             {
-                if !self.connections[&provider].connected {
-                    continue;
-                }
+                // A restored session was verified before it was originally
+                // saved. Keep renewal rotations even if a later check had a
+                // transient error; never discard its refresh cookie.
                 let digest = self.store.vault.fingerprint(&serde_json::to_vec(&saved)?);
                 let marker = format!("native-snapshot:{}", provider.name());
                 if self.store.get_setting(&marker)?.as_deref() != Some(&digest) {
@@ -588,7 +628,12 @@ impl Engine {
     pub async fn tick(&mut self) -> Result<()> {
         if !self.demo {
             for provider in [Provider::Humble, Provider::Steam] {
-                if self.connections[&provider].signing_in {
+                if self.connections[&provider].signing_in
+                    && self
+                        .auth_retry_at
+                        .get(&provider)
+                        .is_none_or(|t| *t <= now())
+                {
                     let result = if let Some(browser) = self.browsers.get(&provider) {
                         browser.authenticated().await
                     } else {
@@ -601,6 +646,10 @@ impl Engine {
                             self.store
                                 .put_secret(&format!("session:{}", provider.name()), &cookies)?;
                             self.bind_session(provider, &binding)?;
+                            if provider == Provider::Steam {
+                                self.steam_identity = crate::browser::steam_account_id(&cookies);
+                            }
+                            self.auth_retry_at.remove(&provider);
                             let c = self.connections.get_mut(&provider).unwrap();
                             c.connected = true;
                             c.signing_in = false;
@@ -613,16 +662,21 @@ impl Engine {
                             if connection.browser.is_none() && self.browsers.contains_key(&provider)
                             {
                                 connection.native_login = true;
+                                connection.signing_in = false;
                                 connection.message =
-                                    "Saved sign-in expired. Open the app's sign-in panel.".into();
+                                    "The provider requires sign-in again. Open the app's sign-in panel.".into();
                             }
                         }
                         Err(error) => {
+                            let deadline = self
+                                .browsers
+                                .get(&provider)
+                                .map(|b| b.native_auth_retry_at())
+                                .unwrap_or(0)
+                                .max(now() + 60);
+                            self.auth_retry_at.insert(provider, deadline);
                             let connection = self.connections.get_mut(&provider).unwrap();
                             connection.message = safe_text(&error.to_string());
-                            if connection.browser.is_none() {
-                                connection.native_login = true;
-                            }
                         }
                     }
                 }
@@ -698,6 +752,51 @@ impl Engine {
             self.claim_choice(&mut batch).await?;
             self.store.put_batch(&batch)?;
             return Ok(());
+        }
+        if self
+            .browsers
+            .get(&Provider::Steam)
+            .is_some_and(|b| b.is_native())
+        {
+            if self
+                .auth_retry_at
+                .get(&Provider::Steam)
+                .is_some_and(|t| *t > now())
+            {
+                return Ok(());
+            }
+            // Verify/renew *before* persisting activation intent. A failed
+            // renewal cannot create an uncertain activation or replay a POST.
+            match self.browsers[&Provider::Steam].authenticated().await {
+                Ok(true) => {
+                    self.persist_native_sessions()?;
+                }
+                Ok(false) => {
+                    let c = self.connections.get_mut(&Provider::Steam).unwrap();
+                    c.connected = false;
+                    c.signing_in = false;
+                    c.native_login = true;
+                    c.message =
+                        "Steam requires sign-in again; the approved queue is paused.".into();
+                    batch.state = "paused".into();
+                    batch.message = c.message.clone();
+                    self.store.put_batch(&batch)?;
+                    return Ok(());
+                }
+                Err(error) => {
+                    let deadline = self.browsers[&Provider::Steam]
+                        .native_auth_retry_at()
+                        .max(now() + 60);
+                    self.auth_retry_at.insert(Provider::Steam, deadline);
+                    batch.message = format!(
+                        "Connection check will retry automatically: {}",
+                        safe_text(&error.to_string())
+                    );
+                    self.persist_native_sessions()?;
+                    self.store.put_batch(&batch)?;
+                    return Ok(());
+                }
+            }
         }
         if !self.owned_checked {
             self.refresh_owned().await?;
@@ -1727,6 +1826,63 @@ mod tests {
 mod regression_tests {
     use super::*;
     use crate::fixtures::Fixture;
+    #[test]
+    fn rotating_cookies_preserve_approval_only_for_the_same_steam_account() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut e = Engine::new(Store::open(dir.path().into(), true).unwrap(), true).unwrap();
+        e.steam_identity = Some("12345678901234567".into());
+        let batch = e.plan(vec!["demo-0".into()], vec![], false).unwrap();
+        let cookies = vec![
+            json!({"name":"steamLoginSecure","value":"12345678901234567%7C%7Crotated-fixture","domain":"store.steampowered.com"}),
+        ];
+        let binding = e.session_binding(Provider::Steam, &cookies);
+        assert_eq!(binding, "demo-binding");
+        e.bind_session(Provider::Steam, &binding).unwrap();
+        assert!(e.validate_review(&batch).is_ok());
+        let other = vec![
+            json!({"name":"steamLoginSecure","value":"12345678901234568%7C%7Cfixture","domain":"store.steampowered.com"}),
+        ];
+        let changed = e.session_binding(Provider::Steam, &other);
+        assert_ne!(changed, binding);
+        e.bind_session(Provider::Steam, &changed).unwrap();
+        assert!(e.validate_review(&batch).is_err());
+    }
+    #[tokio::test]
+    async fn transient_authentication_failure_keeps_saved_state_and_backs_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut e = Engine::new(Store::open(dir.path().into(), true).unwrap(), true).unwrap();
+        let mut fixture = Fixture::service(
+            Provider::Humble,
+            json!({"status":503,"body":"temporarily unavailable"}),
+        )
+        .await;
+        e.browsers
+            .insert(Provider::Humble, fixture.browser.take().unwrap());
+        e.connections.insert(
+            Provider::Humble,
+            Connection {
+                signing_in: true,
+                ..Default::default()
+            },
+        );
+        e.demo = false;
+        e.store
+            .put_secret(
+                "session:humble",
+                &vec![json!({"name":"fixture","value":"keep-this"})],
+            )
+            .unwrap();
+        e.tick().await.unwrap();
+        assert!(e.connections[&Provider::Humble].signing_in);
+        assert!(!e.connections[&Provider::Humble].native_login);
+        assert!(e.auth_retry_at[&Provider::Humble] >= now() + 59);
+        assert!(
+            e.store
+                .secret::<Vec<Value>>("session:humble")
+                .unwrap()
+                .is_some()
+        );
+    }
     async fn live_fixture(response: Value) -> (tempfile::TempDir, Engine, Fixture, Batch) {
         let dir = tempfile::tempdir().unwrap();
         let mut e = Engine::new(Store::open(dir.path().into(), true).unwrap(), true).unwrap();

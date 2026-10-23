@@ -29,6 +29,8 @@ pub struct Login {
     fixture: bool,
     pub fixture_ready: bool,
     pub fixture_diagnostics: Option<Value>,
+    user_agent: Option<String>,
+    last_candidate: Option<Vec<Value>>,
 }
 impl Login {
     pub fn new(
@@ -90,7 +92,7 @@ impl Login {
             builder.with_url(provider.login())
         };
         let view=builder.build_as_child(frame).map_err(|e|anyhow!("Native sign-in could not open: {}. On Windows install Microsoft's WebView2 Runtime; on Linux use an X11/XWayland session with WebKitGTK.",safe_text(&e.to_string())))?;
-        Ok(Self{view:Some(view),_context:context,directory,events,probe_sender,provider,last_check:Instant::now()-Duration::from_secs(10),submitted:false,message:"Enter your credentials directly on the official page below. The app never collects passwords.".into(),fixture,fixture_ready:false,fixture_diagnostics:None})
+        Ok(Self{view:Some(view),_context:context,directory,events,probe_sender,provider,last_check:Instant::now()-Duration::from_secs(10),submitted:false,message:"Enter your credentials directly on the official page below. The app never collects passwords.".into(),fixture,fixture_ready:false,fixture_diagnostics:None,user_agent:None,last_candidate:None})
     }
     pub fn layout(&self, rect: eframe::egui::Rect, visible: bool) {
         if let Some(view) = &self.view {
@@ -105,8 +107,15 @@ impl Login {
     }
     pub fn poll(&mut self, can_submit: bool) -> Option<Command> {
         let view = self.view.as_ref()?;
-        if !self.submitted && self.last_check.elapsed() > Duration::from_secs(4) {
+        let check_due = !self.submitted && self.last_check.elapsed() > Duration::from_secs(4);
+        if check_due {
             self.last_check = Instant::now();
+            let sender = self.probe_sender.clone();
+            let _ = view.evaluate_script_with_callback("navigator.userAgent", move |value| {
+                if let Ok(user_agent) = serde_json::from_str::<String>(&value) {
+                    let _ = sender.send(json!({"native_user_agent":user_agent}));
+                }
+            });
             if self.fixture {
                 let sender = self.probe_sender.clone();
                 let _ = view.evaluate_script_with_callback(
@@ -122,6 +131,9 @@ impl Login {
             }
         }
         while let Ok(event) = self.events.try_recv() {
+            if let Some(ua) = event["native_user_agent"].as_str() {
+                self.user_agent = Some(ua.to_owned());
+            }
             if self.fixture && event.get("fixture_probe").is_some() {
                 self.fixture_diagnostics = Some(event["fixture_probe"].clone());
             }
@@ -166,7 +178,11 @@ impl Login {
                         "The native browser could not hand off its session. Try again.".into();
                     continue;
                 };
-                let cookies=cookies.into_iter().filter(|c|cookie_domain_matches(self.provider,c.domain())).map(|c|json!({"name":c.name(),"value":c.value(),"domain":c.domain(),"path":c.path().unwrap_or("/"),"secure":c.secure().unwrap_or(true),"httpOnly":c.http_only().unwrap_or(false),"expiry":c.expires_datetime().map(|d|d.unix_timestamp())})).collect();
+                let cookies = session_cookies(self.provider, cookies);
+                if self.last_candidate.as_ref() == Some(&cookies) {
+                    continue;
+                }
+                self.last_candidate = Some(cookies.clone());
                 self.submitted = true;
                 self.message = "Verifying the windowless session…".into();
                 return Some(Command::AttachNativeSession {
@@ -179,6 +195,32 @@ impl Login {
                 });
             }
         }
+        // Steam's redeem page can block its JavaScript IPC/fetch probe. Native
+        // cookie availability is enough to *request* verification, never proof
+        // of sign-in: the worker still checks the server's exact Steam identity.
+        if check_due
+            && !self.fixture
+            && self.provider == Provider::Steam
+            && !self.submitted
+            && can_submit
+            && let Some(user_agent) = &self.user_agent
+            && let Ok(url) = view.url()
+            && allowed_origin(self.provider, &url)
+            && let Ok(cookies) = view.cookies()
+        {
+            let cookies = session_cookies(self.provider, cookies);
+            if steam_candidate(&cookies) && self.last_candidate.as_ref() != Some(&cookies) {
+                self.last_candidate = Some(cookies.clone());
+                self.submitted = true;
+                self.message =
+                    "Sign-in detected. Verifying and saving the background session…".into();
+                return Some(Command::AttachNativeSession {
+                    provider: self.provider,
+                    cookies,
+                    user_agent: user_agent.clone(),
+                });
+            }
+        }
         None
     }
     pub fn fixture_mode(&self) -> bool {
@@ -186,8 +228,37 @@ impl Login {
     }
     pub fn retry(&mut self) {
         self.submitted = false;
+        self.last_candidate = None;
         self.last_check = Instant::now() - Duration::from_secs(10);
     }
+    pub fn handoff_failed(&mut self, error: &str) {
+        self.submitted = false;
+        self.message = format!(
+            "Background sign-in could not be saved: {}. Use Verify sign-in again to retry.",
+            safe_text(error)
+        );
+    }
+}
+fn session_cookies(provider: Provider, cookies: Vec<wry::cookie::Cookie<'static>>) -> Vec<Value> {
+    let mut cookies = cookies.into_iter().filter(|c|cookie_domain_matches(provider,c.domain()))
+        .map(|c|json!({"name":c.name(),"value":c.value(),"domain":c.domain(),"path":c.path().unwrap_or("/"),"secure":c.secure().unwrap_or(true),"httpOnly":c.http_only().unwrap_or(false),"expiry":c.expires_datetime().map(|d|d.unix_timestamp())})).collect::<Vec<_>>();
+    cookies.sort_by_key(|c| format!("{}:{}:{}", c["domain"], c["path"], c["name"]));
+    cookies
+}
+fn steam_candidate(cookies: &[Value]) -> bool {
+    let present = |name: &str| {
+        cookies.iter().any(|c| {
+            c["name"] == name
+                && c["value"].as_str().is_some_and(|v| !v.is_empty())
+                && c["domain"].as_str().is_none_or(|d| {
+                    matches!(
+                        d.trim_start_matches('.'),
+                        "steampowered.com" | "store.steampowered.com"
+                    )
+                })
+        })
+    };
+    present("steamLoginSecure") && present("sessionid")
 }
 fn fixture_origin(url: &str) -> bool {
     url == "hrfixture://localhost/login" || url == "http://hrfixture.localhost/login"
@@ -199,14 +270,7 @@ impl Drop for Login {
     }
 }
 fn cookie_domain_matches(provider: Provider, domain: Option<&str>) -> bool {
-    let Ok(uri) = wry::http::Uri::try_from(provider.origin()) else {
-        return false;
-    };
-    let Some(host) = uri.host() else {
-        return false;
-    };
-    let domain = domain.unwrap_or(host).trim_start_matches('.');
-    host == domain || host.ends_with(&format!(".{domain}"))
+    domain.is_none_or(|d| provider.accepts_cookie_domain(d))
 }
 fn authentication_script(provider: Provider, fixture: bool) -> String {
     let path = if provider == Provider::Humble {
@@ -222,7 +286,7 @@ fn authentication_script(provider: Provider, fixture: bool) -> String {
     let body_check = if provider == Provider::Humble {
         "Array.isArray(await r.json().catch(()=>null))"
     } else {
-        r#"/\bg_steamID\s*=\s*["'][0-9]{17}["']/.test(await r.text())"#
+        r#"((text)=>/\bg_steamID\s*=\s*["'][0-9]{17}["']/.test(text)||Number(text.match(/\bg_AccountID\s*=\s*([0-9]+)\s*;/)?.[1])>0)(await r.text())"#
     };
     let redirect_check = if provider == Provider::Humble {
         "!r.redirected&&"
@@ -290,6 +354,29 @@ mod tests {
             Provider::Steam,
             Some(".steampowered.com")
         ));
+        assert!(cookie_domain_matches(
+            Provider::Steam,
+            Some("login.steampowered.com")
+        ));
+        assert!(!cookie_domain_matches(
+            Provider::Steam,
+            Some("login.steampowered.com.example.invalid")
+        ));
+    }
+    #[test]
+    fn native_cookie_handoff_can_start_without_the_page_javascript_probe() {
+        let mut cookies = vec![
+            json!({"name":"steamLoginSecure","value":"synthetic-token","domain":"store.steampowered.com"}),
+            json!({"name":"sessionid","value":"synthetic-session","domain":"store.steampowered.com"}),
+            json!({"name":"steamRefresh_steam","value":"synthetic-refresh","domain":"login.steampowered.com"}),
+        ];
+        assert!(steam_candidate(&cookies));
+        cookies[0]["domain"] = json!("example.invalid");
+        assert!(!steam_candidate(&cookies));
+        cookies.remove(0);
+        assert!(!steam_candidate(&cookies));
+        // A candidate only requests verification. It never marks a connection
+        // authenticated or writes a saved session in the GUI.
     }
     #[test]
     fn login_navigation_is_service_scoped() {

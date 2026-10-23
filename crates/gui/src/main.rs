@@ -184,7 +184,14 @@ impl App {
                     }
                     Err(_) => self.error = "Invalid worker response".into(),
                 },
-                Err(error) => self.error = error,
+                Err(error) => {
+                    if let Some(login) = &mut self.login
+                        && login.submitted
+                    {
+                        login.handoff_failed(&error);
+                    }
+                    self.error = error;
+                }
             }
         }
     }

@@ -402,6 +402,22 @@ impl Browser {
         cookies: Vec<Value>,
         user_agent: String,
     ) -> Result<Self> {
+        Self::from_saved(
+            provider,
+            crate::session::SavedSession {
+                cookies,
+                user_agent,
+                steam_account_id: None,
+            },
+        )
+    }
+    pub(crate) fn from_saved(
+        provider: Provider,
+        saved: crate::session::SavedSession,
+    ) -> Result<Self> {
+        let mut native =
+            crate::session::NativeSession::new(provider, saved.cookies, saved.user_agent)?;
+        native.account_id = saved.steam_account_id.or(native.account_id);
         Ok(Self {
             child: None,
             endpoint: String::new(),
@@ -410,9 +426,7 @@ impl Browser {
             kind: BrowserKind::Chrome,
             provider,
             profile: PathBuf::new(),
-            native: Some(crate::session::NativeSession::new(
-                provider, cookies, user_agent,
-            )?),
+            native: Some(native),
         })
     }
     pub(crate) fn native_snapshot(&self) -> Result<Option<crate::session::SavedSession>> {
@@ -422,9 +436,16 @@ impl Browser {
                 Ok(crate::session::SavedSession {
                     cookies: native.cookies()?,
                     user_agent: native.user_agent.clone(),
+                    steam_account_id: native.account_id.clone(),
                 })
             })
             .transpose()
+    }
+    pub(crate) fn native_auth_retry_at(&self) -> i64 {
+        self.native.as_ref().map(|n| n.auth_retry_at()).unwrap_or(0)
+    }
+    pub(crate) fn is_native(&self) -> bool {
+        self.native.is_some()
     }
     pub async fn open(
         root: &Path,
@@ -631,22 +652,69 @@ impl Browser {
         serde_json::from_value(value).map_err(|_| anyhow!("Service response interrupted"))
     }
     pub async fn authenticated(&self) -> Result<bool> {
+        self.authentication_report()
+            .await
+            .map(|(verified, _)| verified)
+    }
+    pub(crate) async fn authentication_report(&self) -> Result<(bool, String)> {
         let path = match self.provider {
             Provider::Humble => "/api/v1/user/order",
             Provider::Steam => "/account/registerkey",
         };
-        let response = self.fetch(path, None).await?;
+        let mut response = self.fetch(path, None).await?;
+        if response.status == 429
+            && let Some(native) = &self.native
+        {
+            native.defer_auth(Some(response.retry_after.unwrap_or(3600)));
+        }
+        if self.provider == Provider::Steam
+            && matches!(response.status, 200 | 301 | 302 | 303 | 307 | 308 | 401)
+            && !verified_steam_identity(&response.body, &self.cookies().await?)
+            && let Some(native) = &self.native
+            && native.renew_steam().await?
+        {
+            response = self.fetch(path, None).await?;
+        }
+        if response.status == 429 || response.status >= 500 || response.status == 0 {
+            bail!(
+                "Session verification is temporarily unavailable. The saved sign-in was kept; retry later."
+            );
+        }
         if response.status == 403 {
             bail!(
                 "The service blocked its authentication check. Complete any browser security step manually."
             );
         }
-        Ok(response.status == 200
+        let cookies = self.cookies().await?;
+        let verified = response.status == 200
             && if self.provider == Provider::Steam {
-                verified_steam_identity(&response.body, &self.cookies().await?)
+                verified_steam_identity(&response.body, &cookies)
+                    && self
+                        .native
+                        .as_ref()
+                        .and_then(|n| n.account_id.as_ref())
+                        .is_none_or(|expected| {
+                            steam_account_id(&cookies).as_ref() == Some(expected)
+                        })
             } else {
                 !response.redirected && response.body.is_array()
-            })
+            };
+        let cookies_with_id = steam_account_id(&cookies).is_some();
+        let page_with_id = steam_page_identity(&response.body).is_some();
+        Ok((
+            verified,
+            format!(
+                "HTTP {}; server identity {}; saved cookie identity {}; identity match {}; store cookie sent {}; redirected {}",
+                response.status,
+                page_with_id,
+                cookies_with_id,
+                verified_steam_identity(&response.body, &cookies),
+                self.native
+                    .as_ref()
+                    .is_some_and(|n| n.store_cookie_present()),
+                response.redirected
+            ),
+        ))
     }
     pub async fn fetch_many(&self, paths: &[String]) -> Result<Vec<WebResponse>> {
         if self.native.is_some() {
@@ -681,19 +749,46 @@ impl Browser {
     }
 }
 fn verified_steam_identity(body: &Value, cookies: &[Value]) -> bool {
-    let Some(html) = body.as_str() else {
+    let Some(identity) = steam_page_identity(body) else {
         return false;
     };
+    steam_account_id(cookies).as_ref() == Some(&identity)
+}
+fn steam_page_identity(body: &Value) -> Option<String> {
+    let html = body.as_str()?;
     let pattern = regex::Regex::new(r#"\bg_steamID\s*=\s*["']([0-9]{17})["']"#).unwrap();
-    let Some(identity) = pattern.captures(html) else {
-        return false;
-    };
-    cookies.iter().any(|cookie| {
-        cookie["name"] == "steamLoginSecure"
-            && cookie["value"].as_str().is_some_and(|value| {
-                urlencoding::decode(value)
-                    .is_ok_and(|decoded| decoded.split("||").next() == Some(&identity[1]))
-            })
+    let legacy = pattern.captures(html).map(|c| c[1].to_owned());
+    // The current store page exposes g_AccountID (the 32-bit individual
+    // account number), not g_steamID. Construct its public individual desktop
+    // SteamID64 and compare the entire identifier, never a name or substring.
+    let pattern = regex::Regex::new(r"\bg_AccountID\s*=\s*([0-9]+)\s*;").unwrap();
+    let current = pattern
+        .captures(html)
+        .and_then(|c| c[1].parse::<u32>().ok())
+        .filter(|id| *id > 0)
+        .map(|account| {
+            ((1u64 << 56) | (1u64 << 52) | (1u64 << 32) | u64::from(account)).to_string()
+        });
+    match (legacy, current) {
+        (Some(a), Some(b)) if a != b => None,
+        (Some(a), _) | (_, Some(a)) => Some(a),
+        _ => None,
+    }
+}
+pub(crate) fn steam_account_id(cookies: &[Value]) -> Option<String> {
+    cookies.iter().find_map(|cookie| {
+        let domain = cookie["domain"]
+            .as_str()
+            .unwrap_or("store.steampowered.com")
+            .trim_start_matches('.');
+        if cookie["name"] != "steamLoginSecure"
+            || !matches!(domain, "store.steampowered.com" | "steampowered.com")
+        {
+            return None;
+        }
+        let value = urlencoding::decode(cookie["value"].as_str()?).ok()?;
+        let (id, _) = value.split_once("||")?;
+        (id.len() == 17 && id.bytes().all(|b| b.is_ascii_digit())).then(|| id.to_owned())
     })
 }
 impl Drop for Browser {
@@ -743,6 +838,35 @@ mod wire_tests {
     use super::*;
     use crate::fixtures::Fixture;
     #[test]
+    fn encrypted_snapshot_keeps_account_binding_after_access_cookie_expiry() {
+        let browser=Browser::from_native(Provider::Steam,vec![
+            json!({"name":"steamLoginSecure","value":"12345678901234567%7C%7Cexpired-fixture","domain":"store.steampowered.com","expiry":crate::model::now()-60}),
+            json!({"name":"steamRefresh_steam","value":"refresh-fixture","domain":"login.steampowered.com","path":"/jwt"})
+        ],"synthetic-test".into()).unwrap();
+        let saved = browser.native_snapshot().unwrap().unwrap();
+        assert_eq!(saved.steam_account_id.as_deref(), Some("12345678901234567"));
+        assert!(
+            !saved
+                .cookies
+                .iter()
+                .any(|c| c["name"] == "steamLoginSecure")
+        );
+        let restored = Browser::from_saved(Provider::Steam, saved).unwrap();
+        assert_eq!(
+            restored
+                .native_snapshot()
+                .unwrap()
+                .unwrap()
+                .steam_account_id
+                .as_deref(),
+            Some("12345678901234567")
+        );
+        let old: crate::session::SavedSession =
+            serde_json::from_value(json!({"cookies":[],"user_agent":"synthetic-old-version"}))
+                .unwrap();
+        assert!(old.steam_account_id.is_none());
+    }
+    #[test]
     fn steam_sign_in_requires_the_server_identity_to_match_the_cookie() {
         let cookies = vec![
             json!({"name":"steamLoginSecure","value":"12345678901234567%7C%7Csynthetic-token"}),
@@ -762,6 +886,40 @@ mod wire_tests {
         assert!(!verified_steam_identity(
             &json!("<script>g_steamID = \"12345678901234567\";</script>"),
             &[]
+        ));
+    }
+    #[test]
+    fn current_store_account_number_must_match_the_entire_cookie_identity() {
+        let identity = ((1u64 << 56) | (1u64 << 52) | (1u64 << 32) | 42).to_string();
+        let cookies = vec![
+            json!({"name":"steamLoginSecure","value":format!("{identity}%7C%7Cfixture"),"domain":"store.steampowered.com"}),
+        ];
+        assert!(verified_steam_identity(
+            &json!("<script>var g_AccountID = 42;</script>"),
+            &cookies
+        ));
+        for html in [
+            "<script>var g_AccountID = 0;</script>",
+            "<script>var g_AccountID = 43;</script>",
+            "<script>var g_AccountID = 4294967296;</script>",
+            "<div data-miniprofile='42'>Other user</div>",
+        ] {
+            assert!(!verified_steam_identity(&json!(html), &cookies));
+        }
+        assert!(!verified_steam_identity(
+            &json!("<script>g_steamID = \"12345678901234567\"; var g_AccountID = 42;</script>"),
+            &cookies
+        ));
+        assert!(!verified_steam_identity(
+            &json!("<script>var g_AccountID = 42;</script>"),
+            &[]
+        ));
+        let wrong_universe = vec![
+            json!({"name":"steamLoginSecure","value":format!("{}%7C%7Cfixture",(2u64<<56)|(1u64<<52)|(1u64<<32)|42)}),
+        ];
+        assert!(!verified_steam_identity(
+            &json!("<script>var g_AccountID = 42;</script>"),
+            &wrong_universe
         ));
     }
     #[test]

@@ -26,6 +26,17 @@ impl Provider {
             Self::Steam => "https://store.steampowered.com/login/?redir=account%2Fregisterkey",
         }
     }
+    /// Only the service's store and its explicit renewal host can hold sessions.
+    pub fn accepts_cookie_domain(self, domain: &str) -> bool {
+        let domain = domain.trim_start_matches('.');
+        match self {
+            Self::Humble => matches!(domain, "humblebundle.com" | "www.humblebundle.com"),
+            Self::Steam => matches!(
+                domain,
+                "steampowered.com" | "store.steampowered.com" | "login.steampowered.com"
+            ),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -171,6 +182,8 @@ pub struct Connection {
     pub signing_in: bool,
     #[serde(default)]
     pub native_login: bool,
+    #[serde(default)]
+    pub session_renewal_available: bool,
     pub message: String,
     pub browser: Option<BrowserKind>,
 }
