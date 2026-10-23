@@ -1080,9 +1080,7 @@ impl Engine {
         Ok(())
     }
     fn ingest_order(&mut self, order: &Value) -> Result<()> {
-        let source = order["product"]["human_name"]
-            .as_str()
-            .unwrap_or("Humble library");
+        let source = order["product"]["human_name"].as_str();
         let order_id = order["gamekey"].as_str().unwrap_or_default();
         for value in objects(order) {
             let is_steam = value["key_type"]
@@ -1130,8 +1128,14 @@ impl Engine {
                 id: id.clone(),
                 title,
                 app_id: value.get("steam_app_id").and_then(app_id),
-                source: safe_text(source),
-                choice_month: order["product"]["choice_url"].as_str().map(safe_text),
+                source: source
+                    .map(safe_text)
+                    .or_else(|| previous.as_ref().map(|g| g.source.clone()))
+                    .unwrap_or_else(|| "Humble library".into()),
+                choice_month: order["product"]["choice_url"]
+                    .as_str()
+                    .map(safe_text)
+                    .or_else(|| previous.as_ref().and_then(|g| g.choice_month.clone())),
                 outcome,
                 reason: previous
                     .as_ref()
@@ -1640,6 +1644,15 @@ mod tests {
             .unwrap();
         assert!(!batch.approved);
         assert_eq!(batch.state, "review");
+        let ready_id = ready.id.clone();
+        e.ingest_order(&json!({
+            "gamekey":"synthetic-choice-order",
+            "tpkd_dict":{"all":[{"machine_name":"claimed_fixture_steam","human_name":"Claimed fixture","key_type":"steam","steam_app_id":200,"redeemed_key_val":"AAAAA-BBBBB-CCCCC"}]}
+        })).unwrap();
+        let refreshed = e.store.game(&ready_id).unwrap();
+        assert_eq!(refreshed.choice_month.as_deref(), Some("example-month"));
+        assert_eq!(refreshed.source, "Example Humble Choice");
+        assert_eq!(refreshed.outcome, Outcome::Ready);
         assert!(
             !serde_json::to_string(&e.snapshot().unwrap())
                 .unwrap()
