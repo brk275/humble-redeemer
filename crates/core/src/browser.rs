@@ -544,7 +544,9 @@ impl Browser {
           }
           fetch(path, options).then(async response => {
             const text = await response.text(); let body; try {body = JSON.parse(text)} catch (_) {body = text}
-            done({status:response.status,body,redirected:response.redirected,retry_after:Number(response.headers.get('retry-after')) || null});
+            const retry = response.headers.get('retry-after');
+            const delay = retry === null ? null : /^\d+$/.test(retry.trim()) ? Number(retry) : Math.max(0, Math.ceil((Date.parse(retry) - Date.now()) / 1000));
+            done({status:response.status,body,redirected:response.redirected,retry_after:Number.isFinite(delay) ? delay : null});
           }).catch(() => done({status:0,body:null})).finally(() => clearTimeout(timer));
         "#;
         let value = self

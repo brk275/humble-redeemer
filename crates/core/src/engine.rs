@@ -555,6 +555,12 @@ impl Engine {
                     .connected = false;
                 game.outcome = Outcome::LoginRequired;
                 batch.state = "paused".into();
+            } else if response.status == 429 {
+                game.outcome = Outcome::RateLimited;
+                batch.state = "cooldown".into();
+                batch.next_retry_at = Some(cooldown_deadline(response.retry_after));
+                batch.message =
+                    "Humble requested a cooldown. This approved reveal will wait.".into();
             } else if let Some(key) = response.body["key"].as_str().filter(|k| valid_key(k)) {
                 private.key = Some(key.into());
                 game.has_key = true;
@@ -568,7 +574,7 @@ impl Engine {
                     Outcome::Expired
                 } else if msg.contains("exhaust") {
                     Outcome::Exhausted
-                } else if response.status == 0 {
+                } else if response.status == 0 || response.status >= 500 {
                     Outcome::UnknownOutcome
                 } else {
                     Outcome::PermanentFailure
@@ -652,8 +658,7 @@ impl Engine {
                 game.reason = outcome_reason(game.outcome).into();
                 if code == 53 {
                     batch.state = "cooldown".into();
-                    batch.next_retry_at =
-                        Some(now() + response.retry_after.unwrap_or(3600).max(60) as i64);
+                    batch.next_retry_at = Some(cooldown_deadline(response.retry_after));
                     batch.message="Steam activation limit reached; the approved queue will resume after cooldown.".into();
                 } else {
                     batch.cursor += 1;
@@ -667,8 +672,7 @@ impl Engine {
             Ok(response) if response.status == 429 => {
                 game.outcome = Outcome::RateLimited;
                 batch.state = "cooldown".into();
-                batch.next_retry_at =
-                    Some(now() + response.retry_after.unwrap_or(3600).max(60) as i64);
+                batch.next_retry_at = Some(cooldown_deadline(response.retry_after));
             }
             Ok(response) if response.status == 401 || response.status == 403 => {
                 game.outcome = Outcome::LoginRequired;
@@ -1201,6 +1205,9 @@ impl Engine {
         }
         Ok(())
     }
+}
+fn cooldown_deadline(retry_after: Option<u64>) -> i64 {
+    now().saturating_add(i64::try_from(retry_after.unwrap_or(3600).max(60)).unwrap_or(i64::MAX))
 }
 fn app_id(value: &Value) -> Option<u32> {
     value

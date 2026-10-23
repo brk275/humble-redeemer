@@ -77,7 +77,7 @@ impl Outcome {
             Self::UsedElsewhere => "Activated elsewhere",
             Self::Expired => "Expired",
             Self::Exhausted => "Temporarily exhausted",
-            Self::RateLimited => "Steam cooldown",
+            Self::RateLimited => "Activation cooldown",
             Self::LoginRequired => "Sign-in required",
             Self::RetryableFailure => "Retry available",
             Self::PermanentFailure => "Failed",

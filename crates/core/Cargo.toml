@@ -27,7 +27,7 @@ interprocess = { version = "2.2", features = ["tokio"] }
 regex = "1"
 csv = "1"
 zeroize = { version = "1", features = ["derive"] }
-zip = { version = "4", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 flate2 = "1"
 tar = "0.4"
 sysinfo = "0.37"

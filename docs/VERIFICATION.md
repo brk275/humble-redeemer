@@ -6,6 +6,8 @@ On macOS Apple Silicon, the complete Cargo workspace passes formatting, Clippy w
 
 The native worker, CLI and official-SDK MCP server pass an offline protocol integration test. All seven GUI screens render in tests. A native accessibility-driven demo selected a synthetic game, reviewed and approved its batch, completed the queue and displayed the separate result categories.
 
+A RustSec dependency audit reports no known vulnerabilities in the locked dependency set after updating the MCP SDK and ZIP reader to patched releases. Transitive unmaintained-package notices remain tracked as dependency maintenance work.
+
 ## Platform and live-service limits
 
 The GitHub Actions matrix is the source of truth for native package builds and launch checks on macOS Apple Silicon/Intel, Windows x64 and Linux x64. Public CI uses synthetic data only. Build success does not establish a live sign-in or activation.

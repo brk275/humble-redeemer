@@ -18,6 +18,9 @@ def copy_common(destination, binary_dir, extension=""):
     for name in ("humble-redeemer", "hrctl"):
         shutil.copy2(binary_dir / (name + extension), destination / (name + extension))
     shutil.copy2(ROOT / "LICENSE", destination)
+    for document in ("README.md", "SECURITY.md"):
+        shutil.copy2(ROOT / document, destination)
+    shutil.copytree(ROOT / "docs", destination / "docs", dirs_exist_ok=True)
     if (ROOT / "target/notices").exists():
         shutil.copytree(ROOT / "target/notices", destination / "third-party-licenses", dirs_exist_ok=True)
 
