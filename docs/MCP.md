@@ -25,4 +25,6 @@ Protocol and cross-client behavior can be checked offline with `python3 scripts/
 
 ## PlayStation
 
-`psn_offers`, `psn_report`, `psn_configure`, `psn_refresh`, `psn_track`, `psn_plan` and `psn_open` manage public offers and local checklists. Keep the desktop app open to receive an official-page handoff. The human signs in and claims on that page, then confirms in the GUI. Opening a page is never a claim result. No PSN confirmation, cookie/session retrieval, checkout or ownership-marking tool is exposed. See [the PSN guide](PSN.md).
+`psn_offers`, `psn_report`, `psn_configure`, `psn_refresh`, `psn_track`, `psn_plan` and `psn_open` manage public offers and local checklists. Keep the desktop app open to receive an official-page handoff. Opening a page is never a claim result.
+
+When the user explicitly requests browser assistance, `psn_record_observations` can record the selected checklist's observed results together. Its `observations` array contains `offer_id` and `outcome` (`claimed` or `already_in_library`). Only report a free claim after observing Sony change Add to Library to Download from Library; observe existing-library status before claiming. These records are always **Assistant-observed**, distinct from GUI **User-confirmed** records and from independently verified ownership. The tool makes no Sony request. It cannot enroll a subscription, submit checkout, retrieve sessions, or write a User-confirmed result. Authentication/security challenges still require the user. See [the PSN guide](PSN.md).

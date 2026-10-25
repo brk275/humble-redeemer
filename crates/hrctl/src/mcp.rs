@@ -61,6 +61,24 @@ struct PsnTrack {
 }
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct PsnObservations {
+    checklist_id: String,
+    observations: Vec<PsnObservation>,
+}
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct PsnObservation {
+    offer_id: String,
+    outcome: PsnObservedOutcome,
+}
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum PsnObservedOutcome {
+    Claimed,
+    AlreadyInLibrary,
+}
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct Plan {
     game_ids: Vec<String>,
     #[serde(default)]
@@ -122,7 +140,7 @@ impl Redeemer {
         )]))
     }
     #[tool(
-        description = "Read public PlayStation offers, source coverage, local checklists and user-confirmed history. No PSN ownership verification or session data.",
+        description = "Read public PlayStation offers, source coverage, local checklists and history labeled User-confirmed or Assistant-observed. No independently verified PSN ownership or session data.",
         annotations(read_only_hint = true, destructive_hint = false)
     )]
     async fn psn_offers(&self) -> Result<CallToolResult, McpError> {
@@ -134,11 +152,39 @@ impl Redeemer {
         )]))
     }
     #[tool(
-        description = "Read the sanitized local PlayStation report. Claim completion is human-confirmed, not independently verified ownership.",
+        description = "Read the sanitized local PlayStation report with explicit evidence provenance. Local reports are not independently verified ownership.",
         annotations(read_only_hint = true, destructive_hint = false)
     )]
     async fn psn_report(&self) -> Result<CallToolResult, McpError> {
         self.psn_offers().await
+    }
+    #[tool(
+        description = "Record local observations from a browser session explicitly requested by the user. Use claimed only after observing a Free offer change from Add to Library to Download from Library; use already_in_library when Sony showed In library before claiming. Report only selected checklist items on the intended account. Records are always Assistant-observed, never User-confirmed or independently verified ownership. This tool makes no Sony request and cannot submit a claim, checkout, subscription or purchase.",
+        annotations(read_only_hint = false, destructive_hint = false)
+    )]
+    async fn psn_record_observations(
+        &self,
+        Parameters(p): Parameters<PsnObservations>,
+    ) -> Result<CallToolResult, McpError> {
+        self.psn_call(humble_redeemer_core::psn::Command::RecordObservations {
+            checklist_id: p.checklist_id,
+            observations: p
+                .observations
+                .into_iter()
+                .map(|o| humble_redeemer_core::psn::Observation {
+                    offer_id: o.offer_id,
+                    outcome: match o.outcome {
+                        PsnObservedOutcome::Claimed => {
+                            humble_redeemer_core::psn::ObservedOutcome::Claimed
+                        }
+                        PsnObservedOutcome::AlreadyInLibrary => {
+                            humble_redeemer_core::psn::ObservedOutcome::AlreadyInLibrary
+                        }
+                    },
+                })
+                .collect(),
+        })
+        .await
     }
     #[tool(
         description = "Refresh unauthenticated official PlayStation catalog pages, respecting cached results and source cooldowns. Does not access accounts or claim anything.",
@@ -408,6 +454,7 @@ mod tests {
             names.contains(&"psn_offers")
                 && names.contains(&"psn_plan")
                 && names.contains(&"psn_open")
+                && names.contains(&"psn_record_observations")
         );
         assert!(!names.iter().any(|n| n.starts_with("psn_")
             && (n.contains("confirm")
@@ -415,6 +462,7 @@ mod tests {
                 || n.contains("purchase")
                 || n.contains("checkout")
                 || n.contains("owned"))));
+        assert!(serde_json::from_value::<PsnObservations>(json!({"checklist_id":"fixture","observations":[{"offer_id":"fixture","outcome":"claimed","recorded_by":"user_confirmed"}]})).is_err());
         assert!(
             serde_json::from_value::<PsnOpen>(
                 json!({"checklist_id":"fixture","offer_id":"fixture","outcome":"claimed"})

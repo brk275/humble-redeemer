@@ -139,7 +139,7 @@ jobs:
       - name: Verify packaged checksums
         working-directory: artifacts
         run: for sums in SHA256SUMS-*.txt; do sha256sum --check "$sums"; done
-      - name: Publish prerelease
+      - name: Stage prerelease for private artifact verification
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" artifacts/* --prerelease --title "Humble Redeemer $GITHUB_REF_NAME" --notes-file docs/RELEASE.md --verify-tag
+        run: gh release create "$GITHUB_REF_NAME" artifacts/* --draft --prerelease --title "Humble Redeemer $GITHUB_REF_NAME" --notes-file docs/RELEASE.md --verify-tag

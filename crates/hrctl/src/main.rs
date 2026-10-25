@@ -107,6 +107,11 @@ enum PsnAction {
         checklist_id: String,
         offer_id: String,
     },
+    /// Import observations from a user-requested assisted browser session.
+    RecordObservations {
+        checklist_id: String,
+        path: std::path::PathBuf,
+    },
 }
 #[derive(Subcommand)]
 enum BatchAction {
@@ -185,6 +190,18 @@ async fn run(args: Args) -> anyhow::Result<()> {
                     offer_id: offer_id.clone(),
                 },
             },
+            PsnAction::RecordObservations { checklist_id, path } => {
+                if std::fs::metadata(path)?.len() > 512_000 {
+                    anyhow::bail!("Observation report is too large");
+                }
+                let bytes = std::fs::read(path)?;
+                Command::Psn {
+                    command: humble_redeemer_core::psn::Command::RecordObservations {
+                        checklist_id: checklist_id.clone(),
+                        observations: serde_json::from_slice(&bytes)?,
+                    },
+                }
+            }
         },
         Action::Status | Action::Library { .. } | Action::Choices => Command::Snapshot,
         Action::Connect {

@@ -107,7 +107,36 @@ pub struct ClaimRecord {
     pub title: String,
     pub outcome: Confirmation,
     pub evidence: String,
+    #[serde(default)]
+    pub recorded_by: RecordedBy,
     pub at: i64,
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordedBy {
+    #[default]
+    UserConfirmed,
+    AssistantObserved,
+}
+impl RecordedBy {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::UserConfirmed => "User-confirmed",
+            Self::AssistantObserved => "Assistant-observed",
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObservedOutcome {
+    Claimed,
+    AlreadyInLibrary,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Observation {
+    pub offer_id: String,
+    pub outcome: ObservedOutcome,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Checklist {
@@ -153,6 +182,10 @@ pub enum Command {
     Open {
         checklist_id: String,
         offer_id: String,
+    },
+    RecordObservations {
+        checklist_id: String,
+        observations: Vec<Observation>,
     },
     // Native GUI only. Deliberately not represented by CLI commands or MCP schemas.
     Confirm {
@@ -355,6 +388,67 @@ impl State {
                     requested_at: now(),
                 });
             }
+            Command::RecordObservations {
+                checklist_id,
+                observations,
+            } => {
+                if observations.is_empty() || observations.len() > 500 {
+                    bail!("Report between 1 and 500 observed results");
+                }
+                let list = self
+                    .checklists
+                    .iter()
+                    .find(|l| l.id == checklist_id)
+                    .ok_or_else(|| anyhow!("Checklist not found"))?;
+                if list.region != self.config.region {
+                    bail!("Use a checklist from the selected store region");
+                }
+                let mut seen = HashSet::new();
+                let mut records = Vec::new();
+                for observation in observations {
+                    if !list.offer_ids.contains(&observation.offer_id)
+                        || !seen.insert(observation.offer_id.clone())
+                    {
+                        bail!("Each observed offer must occur once in the selected checklist");
+                    }
+                    let offer = self.offer(&observation.offer_id)?;
+                    if offer.region != list.region {
+                        bail!("The observed offer does not match the checklist region");
+                    }
+                    let id = hex::encode(Sha256::digest(format!(
+                        "assistant|{}|{}|{:?}",
+                        list.id, offer.id, observation.outcome
+                    )));
+                    if self.history.iter().any(|r| r.id == id) {
+                        continue;
+                    }
+                    let (outcome, signal) = match observation.outcome {
+                        ObservedOutcome::Claimed => (
+                            Confirmation::Claimed,
+                            "reported a free claim followed by Download from Library",
+                        ),
+                        ObservedOutcome::AlreadyInLibrary => (
+                            Confirmation::AlreadyOwned,
+                            "reported In library or Download from Library before any claim",
+                        ),
+                    };
+                    records.push(ClaimRecord {
+                        id, checklist_id: list.id.clone(), offer_id: offer.id.clone(),
+                        region: offer.region.clone(), title: offer.title.clone(), outcome,
+                        evidence: format!("Assistant-observed; {signal} on Sony's official page during a user-requested browser session. This local report does not independently verify PSN ownership."),
+                        recorded_by: RecordedBy::AssistantObserved, at: now(),
+                    });
+                }
+                let tx = store.db.transaction()?;
+                for record in &records {
+                    tx.execute(
+                        "INSERT INTO psn_history(id,metadata) VALUES (?1,?2)",
+                        rusqlite::params![record.id, serde_json::to_string(record)?],
+                    )?;
+                }
+                tx.commit()?;
+                self.history.extend(records);
+            }
             Command::Confirm {
                 request_id,
                 outcome,
@@ -371,6 +465,7 @@ impl State {
                     evidence:
                         "User-confirmed; PlayStation ownership was not independently verified"
                             .into(),
+                    recorded_by: RecordedBy::UserConfirmed,
                     at: now(),
                 };
                 put_row(store, "psn_history", &record.id, &record)?;
@@ -1470,5 +1565,138 @@ mod session_persistence_tests {
                 .entitlement
                 .contains("Limited")
         );
+    }
+}
+
+#[cfg(test)]
+mod observation_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn assisted_reports_are_atomic_scoped_idempotent_and_keep_their_provenance() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().to_path_buf();
+        let mut store = Store::open(root.clone(), true).unwrap();
+        let mut state = State::load(&store, true).unwrap();
+        state
+            .handle(
+                &mut store,
+                Command::Plan {
+                    offer_ids: vec!["psn-demo-0".into(), "psn-demo-1".into()],
+                },
+                true,
+            )
+            .await
+            .unwrap();
+        let list = state.checklists[0].id.clone();
+        let observed = |id: &str| Observation {
+            offer_id: id.into(),
+            outcome: ObservedOutcome::Claimed,
+        };
+        assert!(
+            state
+                .handle(
+                    &mut store,
+                    Command::RecordObservations {
+                        checklist_id: list.clone(),
+                        observations: vec![observed("psn-demo-0"), observed("psn-demo-2")]
+                    },
+                    true
+                )
+                .await
+                .is_err()
+        );
+        assert!(state.history.is_empty());
+        assert_eq!(
+            store
+                .db
+                .query_row("SELECT COUNT(*) FROM psn_history", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        for _ in 0..2 {
+            state
+                .handle(
+                    &mut store,
+                    Command::RecordObservations {
+                        checklist_id: list.clone(),
+                        observations: vec![observed("psn-demo-0")],
+                    },
+                    true,
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(state.history.len(), 1);
+        assert_eq!(state.history[0].recorded_by, RecordedBy::AssistantObserved);
+        assert!(
+            state.history[0]
+                .evidence
+                .contains("does not independently verify")
+        );
+        state
+            .handle(
+                &mut store,
+                Command::Open {
+                    checklist_id: list.clone(),
+                    offer_id: "psn-demo-1".into(),
+                },
+                true,
+            )
+            .await
+            .unwrap();
+        let request = state.open_request.as_ref().unwrap().id.clone();
+        state
+            .handle(
+                &mut store,
+                Command::Confirm {
+                    request_id: request,
+                    outcome: Confirmation::AlreadyOwned,
+                },
+                true,
+            )
+            .await
+            .unwrap();
+        assert_eq!(state.history[1].recorded_by, RecordedBy::UserConfirmed);
+        let mut old = serde_json::to_value(&state.history[1]).unwrap();
+        old.as_object_mut().unwrap().remove("recorded_by");
+        assert_eq!(
+            serde_json::from_value::<ClaimRecord>(old)
+                .unwrap()
+                .recorded_by,
+            RecordedBy::UserConfirmed
+        );
+        drop(store);
+        let mut store = Store::open(root, true).unwrap();
+        let mut state = State::load(&store, true).unwrap();
+        assert_eq!(state.history.len(), 2);
+        assert_eq!(state.history[0].recorded_by, RecordedBy::AssistantObserved);
+        assert_eq!(state.history[1].recorded_by, RecordedBy::UserConfirmed);
+        state
+            .handle(
+                &mut store,
+                Command::Configure {
+                    region: "en-gb".into(),
+                    notifications: false,
+                },
+                true,
+            )
+            .await
+            .unwrap();
+        assert!(
+            state
+                .handle(
+                    &mut store,
+                    Command::RecordObservations {
+                        checklist_id: list,
+                        observations: vec![observed("psn-demo-0")]
+                    },
+                    true
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(state.history.len(), 2);
     }
 }

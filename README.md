@@ -42,7 +42,7 @@ The legacy Python tool must finish or be paused before starting a Rust redemptio
 
 ## PlayStation
 
-Open **PlayStation**, choose your Sony account’s store locale, and refresh public offers. Prepare a checklist, complete each claim yourself on the official page, and record a user-confirmed result. All free-content categories can be tracked, with manual official links for missing offers. Discovery is incomplete when public Store pages expose only a JavaScript shell; coverage gaps and Unknown fields are shown explicitly. No PSN account bot, automatic purchase, or subscription enrollment is included. See [PSN setup, browser fallback, privacy and assistant commands](docs/PSN.md).
+Open **PlayStation**, choose your Sony account’s store locale, and refresh public offers. Each offer has an **Open claim page** action; multi-item checklists are optional. You can complete a claim yourself, or explicitly ask an assistant to help in a signed-in browser. Local history distinguishes **User-confirmed** and **Assistant-observed** results; neither is independently verified ownership. All free-content categories can be tracked, with manual official links for missing offers. Discovery is incomplete when public Store pages expose only a JavaScript shell; coverage gaps and Unknown fields are shown explicitly. No unattended PSN account bot, automatic purchase, or subscription enrollment is included. See [PSN setup, browser fallback, privacy and assistant commands](docs/PSN.md).
 
 ## CLI
 

@@ -134,6 +134,15 @@ def main():
             assert denied != 0
             forbidden = rpc({'jsonrpc':'2.0','id':7,'method':'tools/call','params':{'name':'psn_confirm','arguments':{'outcome':'claimed'}}})
             assert 'error' in forbidden or forbidden.get('result',{}).get('isError')
+            observed_rpc = rpc({'jsonrpc':'2.0','id':8,'method':'tools/call','params':{'name':'psn_record_observations','arguments':{'checklist_id':checklist['id'],'observations':[{'offer_id':'psn-demo-0','outcome':'claimed'}]}}})
+            observed_mcp = json.loads(observed_rpc['result']['content'][0]['text'])
+            observed_cli = cli('psn','report')
+            assert observed_mcp == observed_cli
+            assert len(observed_cli['history']) == 1 and observed_cli['history'][0]['recorded_by'] == 'assistant_observed'
+            observations = Path(data) / 'observations.json'
+            observations.write_text(json.dumps([{'offer_id':'psn-demo-0','outcome':'claimed'}]))
+            repeated = cli('psn','record-observations',checklist['id'],str(observations))
+            assert len(repeated['history']) == 1
             mcp.stdin.close()
             mcp.wait(timeout=10)
             print("PASS: native IPC, approval gate, queue completion, redacted export, official SDK MCP handshake/tools/status")

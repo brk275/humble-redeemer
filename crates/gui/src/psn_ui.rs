@@ -84,7 +84,7 @@ impl App {
             return;
         }
         egui::CollapsingHeader::new("Store region and reminders").default_open(state.config.region.is_empty()).show(ui,|ui|{
-            ui.label("Choose the locale matching your Sony account. This does not change the account’s region. History is local and user-confirmed.");
+            ui.label("Choose the locale matching your Sony account. This does not change the account’s region. Local history labels who observed each result.");
             ui.horizontal(|ui|{
                 ui.add(egui::TextEdit::singleline(&mut self.psn.region).hint_text("Store locale, e.g. en-us").desired_width(180.));
                 egui::ComboBox::from_id_salt("psn-region").selected_text("Examples").show_ui(ui,|ui|for locale in ["en-us","en-ca","en-gb","de-de","fr-fr","ja-jp","en-au"]{if ui.selectable_label(false,locale).clicked(){self.psn.region=locale.into();}});
@@ -172,7 +172,11 @@ impl App {
                                 ui.horizontal_wrapped(|ui| {
                                     ui.label(&offer.title);
                                     if let Some(r) = record {
-                                        ui.label(format!("{} · User-confirmed", r.outcome.label()));
+                                        ui.label(format!(
+                                            "{} · {}",
+                                            r.outcome.label(),
+                                            r.recorded_by.label()
+                                        ));
                                     }
                                     if ui
                                         .add_enabled(
@@ -235,7 +239,7 @@ impl App {
                         );
                     }
                 });
-            ui.checkbox(&mut self.psn.unclaimed, "Hide user-confirmed claims");
+            ui.checkbox(&mut self.psn.unclaimed, "Hide recorded claims");
             ui.checkbox(&mut self.psn.expiring, "Ends within 72 hours");
         });
         egui::ScrollArea::vertical().show(ui,|ui|{
@@ -244,6 +248,8 @@ impl App {
                 if !o.title.to_lowercase().contains(&self.psn.search.to_lowercase())||self.psn.category.is_some_and(|c|c!=o.category)||(!self.psn.platform.is_empty()&&!o.platforms.contains(&self.psn.platform))|| (self.psn.expiring&&!o.deadline.is_some_and(|t|t>now()&&t-now()<=72*3600))|| (self.psn.unclaimed&&state.history.iter().any(|r|r.offer_id==o.id&&matches!(r.outcome,Confirmation::Claimed|Confirmation::AlreadyOwned))){continue;}
                 count+=1;card(ui,|ui|{
                     let mut selected=self.psn.selected.contains(&o.id);if ui.checkbox(&mut selected,&o.title).changed(){if selected{self.psn.selected.insert(o.id.clone());}else{self.psn.selected.remove(&o.id);}}
+                    if let Some(record)=state.history.iter().rev().find(|r|r.offer_id==o.id){ui.label(format!("{} · {}",record.outcome.label(),record.recorded_by.label()));}
+                    if ui.add_enabled(self.rx.is_none(),egui::Button::new("Open claim page")).clicked(){self.open_psn_offer(o.id.clone());}
                     ui.label(format!("{} · {} · Edition: {}",o.category.label(),o.price.as_deref().unwrap_or("Price unknown — verify on PlayStation"),o.edition.as_deref().unwrap_or("Unknown")));
                     ui.label(format!("Platforms: {} · Subscription: {} · Base game needed: {}",if o.platforms.is_empty(){"Unknown".into()}else{o.platforms.join(", ")},known(o.subscription),known(o.base_game)));
                     ui.label(&o.entitlement);
@@ -256,10 +262,50 @@ impl App {
                 ui.label("Discovery may be incomplete. Public prices do not prove account eligibility or ownership. Missing fields stay Unknown.");
                 for source in &state.sources {ui.hyperlink_to(&source.name,&source.url);ui.label(format!("{} offers · Last successful read: {}",source.count,source.last_success.map(stamp).unwrap_or_else(||"Unknown".into())));if let Some(issue)=&source.issue{ui.colored_label(Color32::from_rgb(242,193,114),issue);}}
             });
-            egui::CollapsingHeader::new("User-confirmed history").show(ui,|ui|for record in state.history.iter().rev().filter(|r|r.region==state.config.region&&r.title.to_lowercase().contains(&self.psn.search.to_lowercase())){
-                ui.label(format!("{} · {} · {}",record.title,record.outcome.label(),stamp(record.at)));ui.small(&record.evidence);
+            egui::CollapsingHeader::new("Claim history").show(ui,|ui|for record in state.history.iter().rev().filter(|r|r.region==state.config.region&&r.title.to_lowercase().contains(&self.psn.search.to_lowercase())){
+                ui.label(format!("{} · {} · {} · {}",record.title,record.outcome.label(),record.recorded_by.label(),stamp(record.at)));ui.small(&record.evidence);
             });
         });
+    }
+    fn open_psn_offer(&mut self, offer_id: String) {
+        if self.rx.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        let demo = self.demo;
+        std::thread::spawn(move || {
+            let result = (|| -> anyhow::Result<Value> {
+                let planned: Snapshot = serde_json::from_value(ipc::blocking_request(
+                    demo,
+                    Command::Psn {
+                        command: psn::Command::Plan {
+                            offer_ids: vec![offer_id.clone()],
+                        },
+                    },
+                )?)?;
+                let list = planned
+                    .psn
+                    .checklists
+                    .last()
+                    .ok_or_else(|| anyhow::anyhow!("Checklist not returned"))?;
+                if list.offer_ids != vec![offer_id.clone()] {
+                    anyhow::bail!("The checklist selection changed; open the offer again");
+                }
+                ipc::blocking_request(
+                    demo,
+                    Command::Psn {
+                        command: psn::Command::Open {
+                            checklist_id: list.id.clone(),
+                            offer_id,
+                        },
+                    },
+                )
+            })()
+            .map_err(|e| safe_text(&e.to_string()));
+            let _ = tx.send(result);
+        });
+        self.rx = Some(rx);
+        self.busy = "Opening the official claim page…".into();
     }
     fn finish_psn(&mut self, outcome: Option<Confirmation>) {
         if self.rx.is_some() {
