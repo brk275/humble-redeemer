@@ -783,18 +783,22 @@ pub fn parse_page(
         let candidate = p.contains("/product/")
             || p.contains("/concept/")
             || (url.host_str() == Some("www.playstation.com") && p.contains("/games/"));
-        if !candidate || !(hint == Category::FreeToPlay || hint == Category::Monthly) {
+        if !candidate
+            || p.split('/').nth(1) != Some(region)
+            || !(hint == Category::FreeToPlay || hint == Category::Monthly)
+        {
             continue;
         }
         let heading = a
             .ancestors()
             .filter_map(scraper::ElementRef::wrap)
             .find_map(|parent| {
-                let h: Vec<_> = parent.select(&Selector::parse("h3").unwrap()).collect();
+                let h: Vec<_> = parent
+                    .select(&Selector::parse("h2, h3, h4").unwrap())
+                    .collect();
                 (h.len() == 1).then(|| h[0].text().collect::<Vec<_>>().join(" "))
             });
         let title = heading
-            .or_else(|| a.value().attr("aria-label").map(str::to_owned))
             .or_else(|| a.value().attr("aria-label").map(str::to_owned))
             .or_else(|| {
                 a.select(&Selector::parse("img[alt]").unwrap())
@@ -812,6 +816,9 @@ pub fn parse_page(
                 "Play now",
                 "Buy now",
                 "View game",
+                "Play for free",
+                "Get this game",
+                "Try this game",
             ]
             .iter()
             .any(|s| title.eq_ignore_ascii_case(s))
@@ -1135,6 +1142,21 @@ mod tests {
         assert!(p.offers[0].price.is_none());
         assert!(p.offers[0].deadline.is_none());
         assert!(p.offers[0].entitlement.contains("Subscription"));
+    }
+    #[test]
+    fn editorial_titles_use_local_headings_and_never_button_labels() {
+        let html = r#"<section><h2>Free games</h2><div><h4>First fixture</h4><div><a href="/en-us/games/first/">Play for free</a></div></div><div><h3>Second fixture</h3><a href="/en-us/games/second/">Play for free</a></div><div><a href="/en-us/games/untitled/">Play for free</a></div><div><h4>Other region</h4><a href="/en-gb/games/wrong/">Play for free</a></div></section>"#;
+        let p = parse_page(
+            html,
+            "https://www.playstation.com/en-us/editorial/free-games/",
+            "en-us",
+            Category::FreeToPlay,
+            1,
+        )
+        .unwrap();
+        let mut titles: Vec<_> = p.offers.iter().map(|o| o.title.as_str()).collect();
+        titles.sort_unstable();
+        assert_eq!(titles, ["First fixture", "Second fixture"]);
     }
     #[test]
     fn public_pagination_deduplicates_and_rejects_other_origins() {

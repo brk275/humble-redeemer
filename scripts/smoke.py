@@ -82,7 +82,7 @@ def main():
             report = Path(data) / "report.csv"
             cli("export", str(report))
             assert "product_key" not in report.read_text()
-            mcp = subprocess.Popen([str(executable), "--demo", "mcp"], env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            mcp = subprocess.Popen([str(executable), "--demo", "mcp"], env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
             incoming = queue.Queue()
             def read_protocol():
                 for line in mcp.stdout:
