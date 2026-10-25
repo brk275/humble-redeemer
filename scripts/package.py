@@ -129,7 +129,7 @@ def main():
     for artifact in sorted(output.iterdir()):
         if artifact.is_file() and artifact.suffix in (".dmg", ".exe", ".deb", ".AppImage", ".zip"):
             checksums.append(hashlib.sha256(artifact.read_bytes()).hexdigest() + "  " + artifact.name)
-    (output / f"SHA256SUMS-{system}-{arch}.txt").write_text("\n".join(checksums) + "\n")
+    (output / f"SHA256SUMS-{system}-{arch}.txt").write_text("\n".join(checksums) + "\n", encoding="utf-8", newline="\n")
     print(json.dumps({"platform": system, "architecture": arch, "packaged": True, "signed_by_publisher": False}))
 
 

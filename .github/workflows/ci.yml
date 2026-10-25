@@ -138,7 +138,7 @@ jobs:
           merge-multiple: true
       - name: Verify packaged checksums
         working-directory: artifacts
-        run: for sums in SHA256SUMS-*.txt; do sha256sum --check "$sums"; done
+        run: for sums in SHA256SUMS-*.txt; do tr -d '\r' < "$sums" | sha256sum --check; done
       - name: Stage prerelease for private artifact verification
         env:
           GH_TOKEN: ${{ github.token }}
