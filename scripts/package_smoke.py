@@ -24,6 +24,11 @@ def exercise(binary_dir):
             subprocess.run(command, env=env, check=True, timeout=60)
             try:
                 subprocess.run([*command, '--login-demo'], env=env, check=True, timeout=60)
+                subprocess.run([*command, '--psn-demo'], env=env, check=True, timeout=60)
+                import json
+                psn_state = json.loads(subprocess.check_output([str(binary_dir / ('hrctl' + suffix)), '--demo', '--json', 'psn', 'report'], env=env, timeout=30))
+                assert not psn_state['history'], 'Opening a synthetic page must never confirm ownership'
+
             except subprocess.CalledProcessError:
                 diagnostics=Path(data)/'smoke-diagnostics.json'
                 if diagnostics.exists(): print(diagnostics.read_text(), flush=True)

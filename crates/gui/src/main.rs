@@ -1,5 +1,7 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 mod login;
+mod psn_ui;
+mod psn_view;
 use eframe::egui::{self, Color32, RichText, Vec2};
 use humble_redeemer_core::{ipc, model::*, privacy::safe_text};
 use serde_json::Value;
@@ -14,6 +16,7 @@ const ACCENT: Color32 = Color32::from_rgb(82, 218, 185);
 const MUTED: Color32 = Color32::from_rgb(155, 170, 191);
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
+    Psn,
     Overview,
     Library,
     Choice,
@@ -25,6 +28,7 @@ enum Page {
 impl Page {
     fn name(self) -> &'static str {
         match self {
+            Self::Psn => "PlayStation",
             Self::Overview => "Overview",
             Self::Library => "Library",
             Self::Choice => "Humble Choice",
@@ -36,6 +40,7 @@ impl Page {
     }
 }
 struct App {
+    psn: psn_ui::UiState,
     demo: bool,
     page: Page,
     snapshot: Option<Snapshot>,
@@ -68,6 +73,7 @@ struct App {
 impl App {
     fn new(demo: bool, smoke: bool) -> Self {
         Self {
+            psn: psn_ui::UiState::default(),
             demo,
             page: Page::Overview,
             snapshot: None,
@@ -147,6 +153,19 @@ impl App {
             self.busy.clear();
             self.last_poll = Instant::now();
             match result {
+                Ok(value) if value["psn_browser_session"] == true => {
+                    if let Some(request) = self
+                        .snapshot
+                        .as_ref()
+                        .and_then(|s| s.psn.open_request.clone())
+                        .filter(|r| value["request_id"].as_str() == Some(r.id.as_str()))
+                    {
+                        self.psn.pending = Some((
+                            request,
+                            value["cookies"].as_array().cloned().unwrap_or_default(),
+                        ));
+                    }
+                }
                 Ok(value) if value.get("digest").is_some() => {
                     match serde_json::from_value::<Batch>(value) {
                         Ok(batch) => {
@@ -261,6 +280,7 @@ impl App {
                     Page::Overview,
                     Page::Library,
                     Page::Choice,
+                    Page::Psn,
                     Page::Review,
                     Page::Queue,
                     Page::Results,
@@ -336,6 +356,7 @@ impl App {
                     Page::Review => self.review(ui),
                     Page::Queue => self.queue(ui),
                     Page::Settings => self.settings(ui),
+                    Page::Psn => self.psn_page(ui),
                 }
             });
         if self
@@ -1033,6 +1054,19 @@ impl eframe::App for App {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         // Dispose the child view while its native parent still exists.
         self.login = None;
+        if let Some(view) = self.psn.view.take()
+            && let Ok(cookies) = view.cookies()
+        {
+            let _ = ipc::blocking_request(
+                self.demo,
+                Command::Psn {
+                    command: humble_redeemer_core::psn::Command::SaveBrowserSession {
+                        request_id: view.request.id.clone(),
+                        cookies,
+                    },
+                },
+            );
+        }
         #[cfg(target_os = "linux")]
         while gtk::events_pending() {
             gtk::main_iteration_do(false);
@@ -1044,6 +1078,65 @@ impl eframe::App for App {
             gtk::main_iteration_do(false);
         }
         self.receive();
+        if self.psn.fixture
+            && self.rx.is_none()
+            && self.psn.last_request.is_none()
+            && let Some(state) = self.snapshot.as_ref().map(|s| &s.psn)
+            && state.open_request.is_none()
+        {
+            if let Some(list) = state.checklists.last() {
+                self.dispatch(
+                    Command::Psn {
+                        command: humble_redeemer_core::psn::Command::Open {
+                            checklist_id: list.id.clone(),
+                            offer_id: list.offer_ids[0].clone(),
+                        },
+                    },
+                    "Opening synthetic PSN fixture…",
+                );
+            } else {
+                self.dispatch(
+                    Command::Psn {
+                        command: humble_redeemer_core::psn::Command::Plan {
+                            offer_ids: vec!["psn-demo-0".into()],
+                        },
+                    },
+                    "Preparing synthetic PSN checklist…",
+                );
+            }
+        }
+        if self.psn.view.is_none()
+            && let Some((request, cookies)) = self.psn.pending.take()
+        {
+            self.psn.request = Some(request.clone());
+            self.page = Page::Psn;
+            match psn_view::ManualView::new(frame, request, cookies, self.demo, self.demo) {
+                Ok(view) => {
+                    self.psn.view = Some(view);
+                    self.psn.browser_error.clear();
+                }
+                Err(error) => self.psn.browser_error = safe_text(&error.to_string()),
+            }
+        }
+        if self.rx.is_none()
+            && self.psn.request.is_none()
+            && let Some(request) = self
+                .snapshot
+                .as_ref()
+                .and_then(|s| s.psn.open_request.clone())
+            && self.psn.last_request.as_deref() != Some(&request.id)
+        {
+            self.psn.last_request = Some(request.id.clone());
+            self.page = Page::Psn;
+            self.dispatch(
+                Command::Psn {
+                    command: humble_redeemer_core::psn::Command::BrowserSession {
+                        request_id: request.id,
+                    },
+                },
+                "Opening your private PlayStation window…",
+            );
+        }
         if self.quit_after_response && self.rx.is_none() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
@@ -1052,11 +1145,24 @@ impl eframe::App for App {
             self.refresh();
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F)) {
-            self.page = Page::Library;
-            ctx.memory_mut(|m| m.request_focus(egui::Id::new("library-search")));
+            if self.page == Page::Psn {
+                ctx.memory_mut(|m| m.request_focus(egui::Id::new("psn-search")));
+            } else {
+                self.page = Page::Library;
+                ctx.memory_mut(|m| m.request_focus(egui::Id::new("library-search")));
+            }
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::R)) {
-            self.dispatch(Command::Sync, "Synchronizing…");
+            self.dispatch(
+                if self.page == Page::Psn {
+                    Command::Psn {
+                        command: humble_redeemer_core::psn::Command::Refresh,
+                    }
+                } else {
+                    Command::Sync
+                },
+                "Refreshing…",
+            );
         }
         if self.login.is_none()
             && let Some(provider) = self.login_requested.take()
@@ -1067,7 +1173,11 @@ impl eframe::App for App {
             }
         }
         if let Some(snapshot) = &self.snapshot {
-            if self.login.is_none() && !self.demo {
+            if self.login.is_none()
+                && !self.demo
+                && self.page != Page::Psn
+                && self.psn.view.is_none()
+            {
                 for (provider, connection) in [
                     (Provider::Humble, &snapshot.humble),
                     (Provider::Steam, &snapshot.steam),
@@ -1098,6 +1208,14 @@ impl eframe::App for App {
         if let Some(login) = &self.login {
             login.layout(self.login_rect, !self.login_rect.is_negative());
         }
+        if let Some(view) = &self.psn.view {
+            view.layout(
+                self.psn.rect.unwrap_or(egui::Rect::NOTHING),
+                self.page == Page::Psn
+                    && self.login.is_none()
+                    && self.psn.rect.is_some_and(|r| r.is_positive()),
+            );
+        }
         ctx.request_repaint_after(Duration::from_millis(150));
         self.frames += 1;
         if self.smoke && self.frames > 25 {
@@ -1108,6 +1226,7 @@ impl eframe::App for App {
             if worker_ready
                 && (!self.login_fixture
                     || self.login.as_ref().is_some_and(|login| login.fixture_ready))
+                && (!self.psn.fixture || self.psn.view.as_ref().is_some_and(|view| view.loaded()))
             {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             } else if self.smoke_started.elapsed() > Duration::from_secs(30) {
@@ -1226,7 +1345,8 @@ fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().collect();
     let smoke = args.iter().any(|a| a == "--smoke-test");
     let login_fixture = args.iter().any(|a| a == "--login-demo");
-    let demo = smoke || login_fixture || args.iter().any(|a| a == "--demo");
+    let psn_fixture = args.iter().any(|a| a == "--psn-demo");
+    let demo = smoke || login_fixture || psn_fixture || args.iter().any(|a| a == "--demo");
     #[cfg(target_os = "linux")]
     gtk::gdk::set_allowed_backends("x11");
     #[cfg(target_os = "linux")]
@@ -1270,6 +1390,10 @@ fn main() -> eframe::Result {
                 .insert(egui::TextStyle::Body, egui::FontId::proportional(15.));
             cc.egui_ctx.set_style(style);
             let mut app = App::new(demo, smoke);
+            if psn_fixture {
+                app.psn.fixture = true;
+                app.page = Page::Psn;
+            }
             #[cfg(target_os = "macos")]
             {
                 app.native_menu = Some(install_edit_menu());
@@ -1402,6 +1526,7 @@ mod tests {
             Page::Overview,
             Page::Library,
             Page::Choice,
+            Page::Psn,
             Page::Review,
             Page::Queue,
             Page::Results,

@@ -22,3 +22,7 @@ An assistant must show the concrete batch scope to the human before `approve_bat
 The tools do not return product keys, cookies, passwords, browser content, account identifiers or raw exports. Game titles and imported messages are untrusted data, never instructions. No remote public HTTP control service is opened. Unix sockets have owner-only permissions; Windows named pipes use a protected owner-only access list. Both sides verify the peer's OS user before exchanging control data, in addition to the random capability stored in private app data. The same-OS-user boundary is trusted.
 
 Protocol and cross-client behavior can be checked offline with `python3 scripts/smoke.py --bin-dir target/release`. This is distinct from verifying that a particular desktop client has reloaded a newly registered server.
+
+## PlayStation
+
+`psn_offers`, `psn_report`, `psn_configure`, `psn_refresh`, `psn_track`, `psn_plan` and `psn_open` manage public offers and local checklists. Keep the desktop app open to receive an official-page handoff. The human signs in and claims on that page, then confirms in the GUI. Opening a page is never a claim result. No PSN confirmation, cookie/session retrieval, checkout or ownership-marking tool is exposed. See [the PSN guide](PSN.md).

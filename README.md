@@ -6,6 +6,7 @@ A native Rust desktop app for managing Humble Bundle keys and activating them on
 
 ## Features
 
+- PlayStation free-content inbox, regional filters, user-operated official-page checklists, encrypted browser sessions, local claim history and optional deadline reminders. [PSN guide and coverage limits](docs/PSN.md).
 - Native egui/eframe interface: connections, searchable library, Humble Choice, batch review, background queue, results and settings.
 - Official provider sign-in inside a private native WebView; typing/paste stay in the app. Verified sessions run windowless afterward and restore on restart.
 - Encrypted private session and key storage backed by the operating system's credential store; session-only fallback.
@@ -38,6 +39,10 @@ Claiming a Choice game on Humble does not activate it on Steam. **Humble Choice 
 Steam activation limits persist across cancellation, new batches and restarts. The worker honors `Retry-After`, including HTTP dates; absent guidance, it waits one hour after an activation-limit response. It never rotates accounts, bypasses the limit or blindly replays an uncertain activation. Expired sessions require manual sign-in again.
 
 The legacy Python tool must finish or be paused before starting a Rust redemption worker. The app detects a running legacy script and refuses concurrent activation.
+
+## PlayStation
+
+Open **PlayStation**, choose your Sony account’s store locale, and refresh public offers. Prepare a checklist, complete each claim yourself on the official page, and record a user-confirmed result. All free-content categories can be tracked, with manual official links for missing offers. Discovery is incomplete when public Store pages expose only a JavaScript shell; coverage gaps and Unknown fields are shown explicitly. No PSN account bot, automatic purchase, or subscription enrollment is included. See [PSN setup, browser fallback, privacy and assistant commands](docs/PSN.md).
 
 ## CLI
 

@@ -120,6 +120,20 @@ def main():
             ownership_cli = cli('ownership', '--apps', '100,101')
             assert ownership_mcp['apps'] == ownership_cli['apps']
             assert [app['app_id'] for app in ownership_mcp['apps']] == [100,101]
+            assert {'psn_offers','psn_report','psn_plan','psn_open','psn_refresh'} <= names
+            assert not any(n.startswith('psn_') and any(word in n for word in ('confirm','session','checkout','owned')) for n in names)
+            psn_rpc = rpc({'jsonrpc':'2.0','id':6,'method':'tools/call','params':{'name':'psn_offers','arguments':{}}})
+            psn_mcp = json.loads(psn_rpc['result']['content'][0]['text'])
+            psn_cli = cli('psn','offers')
+            assert psn_cli == psn_mcp and len(psn_cli['offers']) == 8 and not psn_cli['history']
+            planned_psn = cli('psn','plan','--offers','psn-demo-0')
+            checklist = planned_psn['checklists'][-1]
+            opened_psn = cli('psn','open',checklist['id'],'psn-demo-0')
+            assert opened_psn['open_request'] and not opened_psn['history']
+            denied, _, _ = run_cli(['psn','confirm','claimed'])
+            assert denied != 0
+            forbidden = rpc({'jsonrpc':'2.0','id':7,'method':'tools/call','params':{'name':'psn_confirm','arguments':{'outcome':'claimed'}}})
+            assert 'error' in forbidden or forbidden.get('result',{}).get('isError')
             mcp.stdin.close()
             mcp.wait(timeout=10)
             print("PASS: native IPC, approval gate, queue completion, redacted export, official SDK MCP handshake/tools/status")

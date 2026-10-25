@@ -14,6 +14,7 @@ use std::{
 };
 
 pub struct Engine {
+    psn: crate::psn::State,
     pub store: Store,
     pub demo: bool,
     browsers: HashMap<Provider, Browser>,
@@ -28,7 +29,9 @@ pub struct Engine {
 impl Engine {
     pub fn new(store: Store, demo: bool) -> Result<Self> {
         store.recover()?;
+        let psn = crate::psn::State::load(&store, demo)?;
         let mut this = Self {
+            psn,
             store,
             demo,
             browsers: HashMap::new(),
@@ -172,6 +175,7 @@ impl Engine {
             .flatten()
             .is_some_and(|s| s.cookies.iter().any(|c| c["name"] == "steamRefresh_steam"));
         Ok(Snapshot {
+            psn: self.psn.public(),
             version: env!("CARGO_PKG_VERSION").into(),
             demo: self.demo,
             persistent_vault: self.store.vault.persistent,
@@ -277,6 +281,11 @@ impl Engine {
     }
     pub async fn handle(&mut self, command: Command) -> Result<Value> {
         match command {
+            Command::Psn { command } => {
+                if let Some(value) = self.psn.handle(&mut self.store, command, self.demo).await? {
+                    return Ok(value);
+                }
+            }
             Command::Snapshot => return Ok(serde_json::to_value(self.snapshot()?)?),
             Command::Connect { provider, browser } => {
                 if self.demo {
@@ -681,6 +690,7 @@ impl Engine {
         Ok(())
     }
     pub async fn tick(&mut self) -> Result<()> {
+        self.psn.tick(&mut self.store, self.demo).await?;
         if !self.demo {
             for provider in [Provider::Humble, Provider::Steam] {
                 if self.connections[&provider].signing_in

@@ -30,6 +30,9 @@ httpdate = "1"
 cookie_store = "0.22"
 futures = "0.3"
 zeroize = { version = "1", features = ["derive"] }
+scraper = "0.24"
+time = { version = "0.3", features = ["parsing", "formatting"] }
+notify-rust = "4.18.2"
 zip = { version = "9", default-features = false, features = ["deflate"] }
 flate2 = "1"
 tar = "0.4"

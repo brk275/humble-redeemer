@@ -1,11 +1,11 @@
-# Humble Redeemer 0.1.1 — prerelease
+# Humble Redeemer 0.2.0 — PSN assistant prerelease
 
-Already claimed Humble Choice games now have a clear route to Steam activation: **Humble Choice → View claimed Choice keys awaiting Steam** opens the filtered library for review. Unclaimed monthly selections remain separate. Humble claims and revealed keys do not count as Steam activation results.
+The new **PlayStation** inbox tracks public free-content offers by store locale, with category/platform filters, user-operated claim checklists, local history and optional deadline reminders. Official pages open inside the app, with a normal-browser fallback. Supported embedded cookies use the encrypted local vault; passwords stay on Sony's pages.
 
-Synchronization records Choice-month provenance from paid order metadata. Earlier local records remain queryable without changing their outcomes. GUI, CLI (`library --choice-only --eligible-only`) and MCP (`library` with `choice_only` and `eligible_only`) use the same filters. New batches still require review and explicit permission for unrevealed keys.
+You complete sign-in and Add to Library yourself. Records are explicitly **User-confirmed**. CLI/MCP can query offers, refresh public sources, track official links, prepare checklists and request a claim window; they cannot confirm ownership, read sessions, submit checkout or enroll subscriptions.
 
-Native CI runs unit/state-machine tests, a synthetic worker/CLI/MCP integration test, GUI launch checks and installed/extracted package checks for macOS Apple Silicon/Intel, Windows x64 and Linux x64. No real account data enters CI. See the workflow and verification report for evidence.
+**Coverage limit:** Discovery is not an exhaustive Store catalog. Some current public Store pages return only a JavaScript shell. The app preserves cached data, shows coverage gaps and Unknown fields, and accepts manual official offer links for missing games, DLC and packs. US English editorial recognition is the initial live-tested catalog path. Subscription games, limited trials, demos and permanent giveaways have distinct labels. See [PSN usage and limitations](PSN.md).
 
-Installers remain **unsigned by a publisher**. macOS bundles are ad-hoc signed and are not notarized. Third-party licenses accompany each installer. No telemetry or embedded account data.
+Humble/Steam records and approved-batch rules are preserved. All public tests and CI use synthetic data. See [verification status](VERIFICATION.md) for automated platform evidence and the separate local live-claim acceptance result.
 
-**Live-service limit:** Earlier real sign-in, windowless session restoration, library/Choice synchronization and private CSV migration were verified locally. This update's live synchronization and the approved one-game activation check are pending local macOS vault authorization. Fixture success does not prove a real activation. Original history is preserved; no new claims, reveals or activations are performed merely by opening the new view.
+Installers remain **unsigned by a publisher**; macOS bundles are ad-hoc signed, not notarized. Checksums and dependency license notices accompany the packages. No telemetry or real account material is included.

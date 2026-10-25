@@ -36,6 +36,31 @@ struct OwnershipQuery {
 }
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct PsnPlan {
+    offer_ids: Vec<String>,
+}
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct PsnOpen {
+    checklist_id: String,
+    offer_id: String,
+}
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct PsnConfigure {
+    region: String,
+    #[serde(default)]
+    notifications: bool,
+}
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct PsnTrack {
+    url: String,
+    title: String,
+    category: String,
+}
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct Plan {
     game_ids: Vec<String>,
     #[serde(default)]
@@ -85,6 +110,102 @@ struct Connect {
 
 #[tool_router]
 impl Redeemer {
+    async fn psn_call(
+        &self,
+        command: humble_redeemer_core::psn::Command,
+    ) -> Result<CallToolResult, McpError> {
+        let value = ipc::request(self.demo, Command::Psn { command })
+            .await
+            .map_err(|e| McpError::internal_error(safe_text(&e.to_string()), None))?;
+        Ok(CallToolResult::success(vec![Content::text(
+            value["psn"].to_string(),
+        )]))
+    }
+    #[tool(
+        description = "Read public PlayStation offers, source coverage, local checklists and user-confirmed history. No PSN ownership verification or session data.",
+        annotations(read_only_hint = true, destructive_hint = false)
+    )]
+    async fn psn_offers(&self) -> Result<CallToolResult, McpError> {
+        let value = ipc::request(self.demo, Command::Snapshot)
+            .await
+            .map_err(|e| McpError::internal_error(safe_text(&e.to_string()), None))?;
+        Ok(CallToolResult::success(vec![Content::text(
+            value["psn"].to_string(),
+        )]))
+    }
+    #[tool(
+        description = "Read the sanitized local PlayStation report. Claim completion is human-confirmed, not independently verified ownership.",
+        annotations(read_only_hint = true, destructive_hint = false)
+    )]
+    async fn psn_report(&self) -> Result<CallToolResult, McpError> {
+        self.psn_offers().await
+    }
+    #[tool(
+        description = "Refresh unauthenticated official PlayStation catalog pages, respecting cached results and source cooldowns. Does not access accounts or claim anything.",
+        annotations(read_only_hint = false, destructive_hint = false)
+    )]
+    async fn psn_refresh(&self) -> Result<CallToolResult, McpError> {
+        self.psn_call(humble_redeemer_core::psn::Command::Refresh)
+            .await
+    }
+    #[tool(
+        description = "Set the user's chosen PlayStation store locale and optional desktop reminders. This does not change their Sony account region.",
+        annotations(read_only_hint = false, destructive_hint = false)
+    )]
+    async fn psn_configure(
+        &self,
+        Parameters(p): Parameters<PsnConfigure>,
+    ) -> Result<CallToolResult, McpError> {
+        self.psn_call(humble_redeemer_core::psn::Command::Configure {
+            region: p.region,
+            notifications: p.notifications,
+        })
+        .await
+    }
+    #[tool(
+        description = "Track a user-provided official PlayStation product/game URL for the selected locale. Category: monthly, giveaway, free_to_play, dlc, pack, demo, trial or unknown. Price, edition and ownership remain unknown. Does not open or claim it.",
+        annotations(read_only_hint = false, destructive_hint = false)
+    )]
+    async fn psn_track(
+        &self,
+        Parameters(p): Parameters<PsnTrack>,
+    ) -> Result<CallToolResult, McpError> {
+        let category = serde_json::from_value(json!(p.category))
+            .map_err(|_| McpError::invalid_params("Unknown offer category", None))?;
+        self.psn_call(humble_redeemer_core::psn::Command::Track {
+            url: p.url,
+            title: p.title,
+            category,
+        })
+        .await
+    }
+    #[tool(
+        description = "Prepare a PlayStation offer checklist for human-operated official-page claims. This does not approve, purchase or claim anything.",
+        annotations(read_only_hint = false, destructive_hint = false)
+    )]
+    async fn psn_plan(
+        &self,
+        Parameters(p): Parameters<PsnPlan>,
+    ) -> Result<CallToolResult, McpError> {
+        self.psn_call(humble_redeemer_core::psn::Command::Plan {
+            offer_ids: p.offer_ids,
+        })
+        .await
+    }
+    #[tool(
+        description = "Ask the desktop app to open one selected checklist offer on its official PlayStation page. The human must sign in, claim and confirm in the GUI. Opening is not evidence of ownership.",
+        annotations(read_only_hint = false, destructive_hint = false)
+    )]
+    async fn psn_open(
+        &self,
+        Parameters(p): Parameters<PsnOpen>,
+    ) -> Result<CallToolResult, McpError> {
+        self.psn_call(humble_redeemer_core::psn::Command::Open {
+            checklist_id: p.checklist_id,
+            offer_id: p.offer_id,
+        })
+        .await
+    }
     fn new(demo: bool) -> Self {
         Self {
             demo,
@@ -283,6 +404,23 @@ mod tests {
         let names = tools.iter().map(|t| t.name.as_ref()).collect::<Vec<_>>();
         assert!(names.contains(&"status"));
         assert!(names.contains(&"approve_batch"));
+        assert!(
+            names.contains(&"psn_offers")
+                && names.contains(&"psn_plan")
+                && names.contains(&"psn_open")
+        );
+        assert!(!names.iter().any(|n| n.starts_with("psn_")
+            && (n.contains("confirm")
+                || n.contains("session")
+                || n.contains("purchase")
+                || n.contains("checkout")
+                || n.contains("owned"))));
+        assert!(
+            serde_json::from_value::<PsnOpen>(
+                json!({"checklist_id":"fixture","offer_id":"fixture","outcome":"claimed"})
+            )
+            .is_err()
+        );
         assert!(!names.iter().any(|n| n.contains("reveal_key")
             || n.contains("password")
             || n.contains("export_keys")));

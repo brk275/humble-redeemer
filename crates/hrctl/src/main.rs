@@ -15,6 +15,10 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Action {
+    Psn {
+        #[command(subcommand)]
+        command: PsnAction,
+    },
     Status,
     Worker,
     Mcp,
@@ -77,6 +81,34 @@ enum Action {
     },
 }
 #[derive(Subcommand)]
+enum PsnAction {
+    Track {
+        #[arg(long)]
+        url: String,
+        #[arg(long)]
+        title: String,
+        #[arg(long, default_value = "unknown")]
+        category: String,
+    },
+    Offers,
+    Report,
+    Refresh,
+    Configure {
+        #[arg(long)]
+        region: String,
+        #[arg(long)]
+        notifications: bool,
+    },
+    Plan {
+        #[arg(long, value_delimiter = ',', required = true)]
+        offers: Vec<String>,
+    },
+    Open {
+        checklist_id: String,
+        offer_id: String,
+    },
+}
+#[derive(Subcommand)]
 enum BatchAction {
     Approve {
         id: String,
@@ -114,6 +146,46 @@ async fn run(args: Args) -> anyhow::Result<()> {
         ipc::ensure_worker(args.demo).await?;
     }
     let command = match args.command {
+        Action::Psn { ref command } => match command {
+            PsnAction::Track {
+                url,
+                title,
+                category,
+            } => Command::Psn {
+                command: humble_redeemer_core::psn::Command::Track {
+                    url: url.clone(),
+                    title: title.clone(),
+                    category: serde_json::from_value(json!(category))?,
+                },
+            },
+            PsnAction::Offers | PsnAction::Report => Command::Snapshot,
+            PsnAction::Refresh => Command::Psn {
+                command: humble_redeemer_core::psn::Command::Refresh,
+            },
+            PsnAction::Configure {
+                region,
+                notifications,
+            } => Command::Psn {
+                command: humble_redeemer_core::psn::Command::Configure {
+                    region: region.clone(),
+                    notifications: *notifications,
+                },
+            },
+            PsnAction::Plan { offers } => Command::Psn {
+                command: humble_redeemer_core::psn::Command::Plan {
+                    offer_ids: offers.clone(),
+                },
+            },
+            PsnAction::Open {
+                checklist_id,
+                offer_id,
+            } => Command::Psn {
+                command: humble_redeemer_core::psn::Command::Open {
+                    checklist_id: checklist_id.clone(),
+                    offer_id: offer_id.clone(),
+                },
+            },
+        },
         Action::Status | Action::Library { .. } | Action::Choices => Command::Snapshot,
         Action::Connect {
             ref provider,
@@ -190,6 +262,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
     };
     let mut value = ipc::request(args.demo, command).await?;
     match args.command {
+        Action::Psn { .. } => value = value["psn"].clone(),
         Action::Library {
             search,
             choice_only,

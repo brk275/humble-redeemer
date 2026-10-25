@@ -216,6 +216,8 @@ impl Batch {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Snapshot {
+    #[serde(default)]
+    pub psn: crate::psn::State,
     pub version: String,
     pub demo: bool,
     pub persistent_vault: bool,
@@ -233,6 +235,9 @@ pub struct Snapshot {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Command {
+    Psn {
+        command: crate::psn::Command,
+    },
     Snapshot,
     Connect {
         provider: Provider,
