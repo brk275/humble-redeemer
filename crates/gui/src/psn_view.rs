@@ -63,7 +63,9 @@ impl ManualView {
             builder = builder.with_additional_browser_args("");
         }
         if fixture {
-            builder=builder.with_custom_protocol("hrpsnfixture".into(),|_,_|wry::http::Response::builder().header("Content-Type","text/html").body(std::borrow::Cow::Borrowed(b"<!doctype html><html><body style='font:20px system-ui;padding:24px'><h1>Synthetic PlayStation claim page</h1><p>No account or purchase is involved.</p><label>Fixture input <input aria-label='Fixture input'></label><button onclick=\"document.getElementById('result').textContent='Synthetic success: the app still needs a human confirmation.'\">Simulate Add to Library</button><p id='result'></p></body></html>".as_slice())).expect("static fixture"));
+            // Builder navigation applies Wry's custom-protocol URL mapping on
+            // WebView2. A later load_url call does not perform that mapping.
+            builder=builder.with_custom_protocol("hrpsnfixture".into(),|_,_|wry::http::Response::builder().header("Content-Type","text/html").body(std::borrow::Cow::Borrowed(b"<!doctype html><html><body style='font:20px system-ui;padding:24px'><h1>Synthetic PlayStation claim page</h1><p>No account or purchase is involved.</p><label>Fixture input <input aria-label='Fixture input'></label><button onclick=\"document.getElementById('result').textContent='Synthetic success: the app still needs a human confirmation.'\">Simulate Add to Library</button><p id='result'></p></body></html>".as_slice())).expect("static fixture")).with_url("hrpsnfixture://localhost/claim");
         }
         let view = builder.build_as_child(frame).map_err(|_| {
             anyhow!("The embedded PlayStation page could not open. Use Open in normal browser.")
@@ -96,11 +98,9 @@ impl ManualView {
             }
             view.set_cookie(&cookie.build())?;
         }
-        view.load_url(if fixture {
-            "hrpsnfixture://localhost/claim"
-        } else {
-            &request.url
-        })?;
+        if !fixture {
+            view.load_url(&request.url)?;
+        }
         Ok(Self {
             view: Some(view),
             _context: context,

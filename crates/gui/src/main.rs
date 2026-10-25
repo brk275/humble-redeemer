@@ -1239,6 +1239,10 @@ impl eframe::App for App {
                         "worker_pending":self.rx.is_some(),
                         "snapshot_received":self.snapshot.is_some(),
                         "fixture_probe":self.login.as_ref().and_then(|login|login.fixture_diagnostics.as_ref()),
+                        "psn_has_view":self.psn.view.is_some(),
+                        "psn_loaded":self.psn.view.as_ref().is_some_and(|view|view.loaded()),
+                        "psn_error":safe_text(&self.psn.browser_error),
+                        "psn_request_received":self.psn.request.is_some(),
                     });
                     let _ = std::fs::write(
                         root.join("smoke-diagnostics.json"),
